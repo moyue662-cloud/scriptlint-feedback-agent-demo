@@ -10,6 +10,10 @@ from eval.run_scriptlint_eval import load_scriptlint_eval, run_scriptlint_eval
 APP_PATH = Path(__file__).parents[1] / "scriptlint_app.py"
 
 
+def _navigate(app: AppTest, label: str) -> AppTest:
+    return app.radio[0].set_value(label).run(timeout=20)
+
+
 def test_scriptlint_eval_fixture_has_required_guard_categories():
     fixture = load_scriptlint_eval()
     categories = {case.category for case in fixture.cases}
@@ -38,6 +42,7 @@ def test_confirmed_memory_outperforms_no_memory_on_fixed_eval():
 def test_streamlit_demo_click_path_changes_after_confirmation(tmp_path, monkeypatch):
     monkeypatch.setenv("DP_DB_PATH", str(tmp_path / "scriptlint_ui.db"))
     app = AppTest.from_file(str(APP_PATH)).run(timeout=20)
+    app = _navigate(app, "剧本审计")
     assert not app.exception
     project_code = next(item.value for item in app.text_input if item.label == "项目代码")
 
@@ -71,8 +76,7 @@ def test_streamlit_demo_click_path_changes_after_confirmation(tmp_path, monkeypa
 def test_streamlit_evaluation_page_runs_without_exception(tmp_path, monkeypatch):
     monkeypatch.setenv("DP_DB_PATH", str(tmp_path / "scriptlint_eval_ui.db"))
     app = AppTest.from_file(str(APP_PATH)).run(timeout=20)
-    nav = app.radio[0]
-    nav.set_value(nav.options[2]).run(timeout=20)
+    app = _navigate(app, "固定评测")
     app.button[0].click().run(timeout=30)
 
     assert not app.exception
@@ -83,6 +87,7 @@ def test_streamlit_evaluation_page_runs_without_exception(tmp_path, monkeypatch)
 def test_streamlit_accepts_a_user_fountain_file(tmp_path, monkeypatch):
     monkeypatch.setenv("DP_DB_PATH", str(tmp_path / "scriptlint_upload_ui.db"))
     app = AppTest.from_file(str(APP_PATH)).run(timeout=20)
+    app = _navigate(app, "剧本审计")
     own_script = "INT. 仓库 - 夜\n林夏左手缠着绷带。\n林夏：账本就在城南仓库。"
     app.file_uploader[0].set_value(
         ("my_episode.fountain", own_script.encode("utf-8"), "text/plain")
@@ -96,11 +101,24 @@ def test_streamlit_accepts_a_user_fountain_file(tmp_path, monkeypatch):
 def test_streamlit_user_validation_page_starts_empty(tmp_path, monkeypatch):
     monkeypatch.setenv("DP_DB_PATH", str(tmp_path / "scriptlint_validation_ui.db"))
     app = AppTest.from_file(str(APP_PATH)).run(timeout=20)
-    nav = app.radio[0]
-    nav.set_value(nav.options[3]).run(timeout=20)
+    app = _navigate(app, "用户验证")
 
     assert not app.exception
     assert len(app.metric) == 6
     assert app.metric[0].value == "0"
     assert len(app.text_input) >= 1
     assert len(app.checkbox) == 1
+
+
+def test_audio_review_is_homepage_and_requires_video(tmp_path, monkeypatch):
+    monkeypatch.setenv("DP_DB_PATH", str(tmp_path / "scriptlint_audio_ui.db"))
+    app = AppTest.from_file(str(APP_PATH)).run(timeout=20)
+
+    assert not app.exception
+    assert app.radio[0].value == "视频音频审片"
+    assert app.file_uploader[0].label == "上传短剧成片"
+    next(
+        button for button in app.button if button.label == "提取音轨并对照剧本审核"
+    ).click().run(timeout=20)
+    assert not app.exception
+    assert any("请先上传视频文件" in item.value for item in app.warning)

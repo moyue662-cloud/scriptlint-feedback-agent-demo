@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scriptlint-feedback-agent"
-version = "0.3.0"
-description = "ScriptLint — feedback-memory agent for short-drama consistency auditing"
+version = "0.4.0"
+description = "ScriptLint — video audio review and feedback-memory agent for short dramas"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "ScriptLint Demo Team" }]
@@ -13,6 +13,8 @@ dependencies = [
     "streamlit>=1.36,<2.0",
     "pydantic>=2.7,<3.0",
     "openai>=1.35,<2.0",
+    "faster-whisper>=1.2,<2.0",
+    "numpy>=1.26,<3.0",
 ]
 
 [project.optional-dependencies]

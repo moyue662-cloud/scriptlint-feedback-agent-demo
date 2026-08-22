@@ -10,6 +10,10 @@ pydantic>=2.7,<3.0
 # --- LLM provider (七牛云 OpenAI 兼容接口) ---
 openai>=1.35,<2.0
 
+# --- Video audio review (PyAV bundles FFmpeg libraries) ---
+faster-whisper>=1.2,<2.0
+numpy>=1.26,<3.0
+
 # --- Storage ---
 # sqlite3 is in the standard library; no extra package needed.
 

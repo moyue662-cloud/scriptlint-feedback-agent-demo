@@ -62,11 +62,17 @@ from .scriptlint import (
     ValidationRole,
 )
 from .multimodal import (
+    AudioQualityMetrics,
+    AudioReviewReport,
+    DialogueAlignment,
+    DialogueMatchStatus,
     EvidenceLocator,
     ReviewAsset,
     ReviewEvidence,
     ReviewModality,
     ReviewObservation,
+    ScriptDialogueLine,
+    TranscriptSegment,
 )
 from .evaluation import (
     ClassifiedItem,
@@ -115,6 +121,12 @@ __all__ = [
     "ReviewAsset",
     "ReviewEvidence",
     "ReviewObservation",
+    "TranscriptSegment",
+    "ScriptDialogueLine",
+    "DialogueMatchStatus",
+    "DialogueAlignment",
+    "AudioQualityMetrics",
+    "AudioReviewReport",
     "RuleUseDecision",
     "RuleUseTrace",
     "FindingType",

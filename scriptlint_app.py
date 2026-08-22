@@ -4,8 +4,10 @@ from __future__ import annotations
 import html
 import hashlib
 import inspect
+import json
 import os
 import sqlite3
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,6 +17,7 @@ import streamlit as st
 from config import PROJECT_ROOT
 from eval.run_scriptlint_eval import run_scriptlint_eval
 from repositories import SQLiteRepository
+from schemas.multimodal import AudioReviewReport, DialogueMatchStatus
 from schemas.scriptlint import (
     RuleUseDecision,
     ScriptAgentResult,
@@ -29,6 +32,12 @@ from schemas.scriptlint import (
 )
 from services.scriptlint_agent import ScriptLintAgent
 from services.script_validation_service import ScriptValidationService
+from services.audio_review_service import (
+    AudioReviewError,
+    AudioReviewService,
+    FasterWhisperTranscriber,
+    MAX_VIDEO_BYTES,
+)
 
 
 CST = timezone(timedelta(hours=8))
@@ -128,6 +137,11 @@ def _runtime(db_path: str):
     return repo, ScriptLintAgent(repo)
 
 
+@st.cache_resource(show_spinner=False)
+def _asr_transcriber(model_name: str) -> FasterWhisperTranscriber:
+    return FasterWhisperTranscriber(model_name)
+
+
 def _inject_css() -> None:
     st.markdown(
         """
@@ -209,6 +223,8 @@ def _reset_demo(repo: SQLiteRepository) -> None:
     for key in (
         "scriptlint_result",
         "scriptlint_feedback",
+        "audio_review_report",
+        "audio_script_result",
         "eval_result",
         "confirm_clear",
     ):
@@ -229,7 +245,7 @@ def _sidebar(repo: SQLiteRepository) -> None:
             '<div class="brand-sub">Feedback memory agent</div></div></div>',
             unsafe_allow_html=True,
         )
-        st.caption("人物一致性、改稿规则记忆与跨版本审计。")
+        st.caption("成片音频、人物一致性、改稿规则记忆与跨版本审计。")
         st.markdown("<div class='section-label'>当前项目</div>", unsafe_allow_html=True)
         st.markdown(f"**《{html.escape(_project_name())}》**")
         st.caption(f"匿名项目隔离键：{_project_id()}（请勿公开复用）")
@@ -269,17 +285,17 @@ def _sidebar(repo: SQLiteRepository) -> None:
         st.markdown("<div style='font-size:12px;line-height:1.9;color:#bdc3d1;'>"
                     "<span style='color:#60d6b1'>●</span> 本地 SQLite<br>"
                     "<span style='color:#60d6b1'>●</span> 六类文本审计<br>"
-                    "<span style='color:#60d6b1'>●</span> 多模态证据契约</div>", unsafe_allow_html=True)
-        st.caption("当前只分析剧本文本；视频/音频适配器为后续扩展位。")
+                    "<span style='color:#60d6b1'>●</span> 视频音轨 ASR 对齐</div>", unsafe_allow_html=True)
+        st.caption("当前可审视频音轨；画面动作、表情、服化道仍是后续视觉阶段。")
 
 
 def _header() -> None:
     st.markdown(
         '<div class="hero"><div><div class="eyebrow">Character continuity & feedback memory</div>'
-        '<h1>审你的剧本，也记住你的改法。</h1>'
-        '<p>导入自己的剧本，检查人物动作、外观、知情边界、情绪与道具连续性；'
-        '再把你的改稿意见沉淀为项目规则，让后续版本自动复用并保留双向证据。</p></div>'
-        '<div class="mode-pill"><span class="mode-dot"></span>文本 Demo · 视频可扩展</div></div>',
+        '<h1>从剧本到成片，问题都有证据。</h1>'
+        '<p>上传成片后提取音轨、生成时间码转写并与剧本台词对齐；同时检查人物动作、外观、'
+        '知情边界与道具连续性，把编导纠正沉淀为后续版本可复用的项目规则。</p></div>'
+        '<div class="mode-pill"><span class="mode-dot"></span>视频音频审片 MVP</div></div>',
         unsafe_allow_html=True,
     )
     stage = st.session_state.get("demo_stage", 1)
@@ -512,10 +528,15 @@ def _render_feedback(
     repo: SQLiteRepository,
     agent: ScriptLintAgent,
     result: ScriptAgentResult,
+    *,
+    title: str = "纠正并形成记忆",
+    input_label: str = "告诉系统错在哪里",
+    default_text: str = DEMO_FEEDBACK,
 ) -> None:
-    st.markdown("<div class='section-label'>纠正并形成记忆</div>", unsafe_allow_html=True)
-    with st.form("feedback_form"):
-        feedback_text = st.text_area("告诉系统错在哪里", value=DEMO_FEEDBACK, height=105)
+    st.markdown(f"<div class='section-label'>{html.escape(title)}</div>", unsafe_allow_html=True)
+    form_key = "audio_feedback_form" if title.startswith("音频") else "feedback_form"
+    with st.form(form_key):
+        feedback_text = st.text_area(input_label, value=default_text, height=105)
         submitted = st.form_submit_button("生成候选规则", type="primary", **_stretch(st.form_submit_button))
     if submitted:
         with st.spinner("正在把纠正形式化为候选规则…"):
@@ -556,6 +577,191 @@ def _render_feedback(
                     st.rerun()
             with c3:
                 st.caption("只有点击确认后，这条规则才会影响后续任务。")
+
+
+def _timestamp(milliseconds: int | None) -> str:
+    if milliseconds is None:
+        return "—"
+    total_seconds = milliseconds / 1000
+    minutes = int(total_seconds // 60)
+    seconds = total_seconds - minutes * 60
+    return f"{minutes:02d}:{seconds:05.2f}"
+
+
+def _clear_audio_result() -> None:
+    st.session_state.pop("audio_review_report", None)
+    st.session_state.pop("audio_script_result", None)
+
+
+def _render_audio_report(report: AudioReviewReport) -> None:
+    st.markdown("<div class='section-label'>音轨—剧本审计结果</div>", unsafe_allow_html=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("整体台词相似度", f"{report.overall_similarity:.0%}")
+    c2.metric("基本一致", report.matched_count)
+    c3.metric("疑似改词", report.changed_count)
+    c4.metric("疑似漏词", report.missing_count)
+    c5.metric("疑似加词", report.extra_count)
+    st.caption(
+        f"ASR 模型：{report.model_name} · 识别语言：{report.detected_language or '未知'} · "
+        f"音轨时长：{report.quality.duration_ms / 1000:.1f}s · 总耗时：{report.elapsed_ms / 1000:.1f}s"
+    )
+
+    if report.quality.warnings:
+        for warning in report.quality.warnings:
+            st.warning(f"音质提示：{warning}")
+    else:
+        st.success("音轨基础质量未触发低音量、削波或高静音比例提示。")
+
+    issues = [
+        item for item in report.alignments if item.status != DialogueMatchStatus.matched
+    ]
+    if not issues:
+        st.success("当前 ASR 结果与剧本台词基本一致。请抽听关键时间码完成最终人工确认。")
+    else:
+        labels = {
+            DialogueMatchStatus.changed: "疑似改词",
+            DialogueMatchStatus.missing: "疑似漏词",
+            DialogueMatchStatus.extra: "疑似加词",
+        }
+        for item in issues:
+            time_range = f"{_timestamp(item.start_ms)}–{_timestamp(item.end_ms)}"
+            expected = html.escape(item.expected_text or "—")
+            recognized = html.escape(item.recognized_text or "—")
+            speaker_suffix = f" · {html.escape(item.speaker)}" if item.speaker else ""
+            st.markdown(
+                "<div class='finding'>"
+                f"<div class='finding-title'>{labels.get(item.status, '需复核')} · {time_range}</div>"
+                f"<div class='panel-note'>{html.escape(item.reason)}</div>"
+                f"<div class='source-quote'><b>剧本 · 第{item.script_line_number or '—'}行{speaker_suffix}</b><br>“{expected}”</div>"
+                f"<div class='trace-quote'><b>ASR 音频证据</b><br>“{recognized}”</div>"
+                f"<div class='panel-note' style='margin-top:10px'><b>建议：</b>{html.escape(item.suggestion)}</div>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+
+    with st.expander(f"查看完整时间码转写（{len(report.transcript_segments)} 段）"):
+        st.dataframe(
+            [
+                {
+                    "开始": _timestamp(segment.start_ms),
+                    "结束": _timestamp(segment.end_ms),
+                    "ASR 文本": segment.text,
+                    "置信度": "—" if segment.confidence is None else f"{segment.confidence:.0%}",
+                }
+                for segment in report.transcript_segments
+            ],
+            hide_index=True,
+            **_stretch(st.dataframe),
+        )
+    with st.expander("查看音轨质量指标"):
+        st.json(report.quality.model_dump(mode="json"))
+    st.download_button(
+        "下载审片 JSON 报告",
+        data=json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        file_name="scriptlint_audio_review.json",
+        mime="application/json",
+    )
+    st.info(
+        "重要边界：这一版只能确认‘声音中识别到了什么’，不能仅凭音轨判断是谁说的，"
+        "也不能判断动作、表情、服装和道具。所有异常必须由编导回看时间码确认。"
+    )
+
+
+def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
+    st.markdown(
+        '<div class="panel"><div class="panel-title">视频音频审片</div>'
+        '<div class="panel-note">上传成片 → 提取 16kHz 单声道音轨 → 中文 ASR → '
+        '按时间码与“角色：台词”逐行对齐。第一次运行会下载语音模型，耗时会更长。</div>',
+        unsafe_allow_html=True,
+    )
+    c1, c2 = st.columns([1.35, 1])
+    with c1:
+        st.text_input("项目名称", key="project_name", placeholder="例如：雨夜便利店")
+    with c2:
+        st.text_input("项目代码", key="project_code", help="保持相同代码可复用项目规则")
+
+    st.text_area(
+        "对照剧本",
+        key="script_input",
+        height=220,
+        placeholder="必须包含“角色：台词”格式，例如：林夏：账本在仓库。",
+        on_change=_clear_audio_result,
+    )
+    video = st.file_uploader(
+        "上传短剧成片",
+        type=["mp4", "mov", "mkv", "webm", "avi", "m4v"],
+        key="audio_review_video",
+        help="Demo 单文件最多 200MB、音轨最长 12 分钟。请只上传已获授权、已脱敏片段。",
+        on_change=_clear_audio_result,
+    )
+    if video is not None:
+        st.video(video.getvalue())
+        st.caption(f"已选择：{video.name} · {video.size / 1024 / 1024:.1f}MB")
+    model_name = st.selectbox(
+        "语音模型",
+        ["tiny", "base"],
+        format_func=lambda value: "tiny｜最快，适合流程演示" if value == "tiny" else "base｜中文更稳，首次下载与识别更慢",
+    )
+    run_audio = st.button(
+        "提取音轨并对照剧本审核",
+        type="primary",
+        **_stretch(st.button),
+    )
+    st.caption(
+        "隐私提示：视频会在当前实例的临时目录中处理，完成后立即删除；审片结果仅保留文本摘要。"
+    )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    if run_audio:
+        _clear_audio_result()
+        script_text = st.session_state.get("script_input", "").strip()
+        if video is None:
+            st.warning("请先上传视频文件。")
+        elif not script_text:
+            st.warning("请先粘贴对照剧本。")
+        elif video.size > MAX_VIDEO_BYTES:
+            st.error("视频超过 200MB。请先截取需要审核的片段。")
+        else:
+            suffix = Path(video.name).suffix.lower()
+            try:
+                with st.spinner("正在加载语音模型、提取音轨并生成时间码转写…"):
+                    with tempfile.TemporaryDirectory(prefix="scriptlint_audio_") as temp_dir:
+                        video_path = Path(temp_dir) / f"source{suffix}"
+                        wav_path = Path(temp_dir) / "audio.wav"
+                        video_path.write_bytes(video.getvalue())
+                        service = AudioReviewService(_asr_transcriber(model_name))
+                        report = service.review_video(
+                            video_path=video_path,
+                            wav_path=wav_path,
+                            script_text=script_text,
+                            source_name=video.name,
+                            created_at=_now(),
+                        )
+                        st.session_state["audio_review_report"] = report
+                        st.session_state["audio_script_result"] = _run(agent, _new_task())
+            except AudioReviewError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"音频审片失败：{exc}")
+
+    report: AudioReviewReport | None = st.session_state.get("audio_review_report")
+    if report:
+        _render_audio_report(report)
+        script_result: ScriptAgentResult | None = st.session_state.get("audio_script_result")
+        if script_result and script_result.task.project_id == _project_id():
+            with st.expander(
+                f"同轮反馈记忆审计：命中 {script_result.metrics.memory_hit_count} 条规则，"
+                f"发现 {len(script_result.audit.findings)} 个文本问题"
+            ):
+                _render_result(script_result)
+            _render_feedback(
+                repo,
+                agent,
+                script_result,
+                title="音频审片后纠正并形成记忆",
+                input_label="告诉系统这次成片哪里不符合你的审核规则",
+                default_text="“账本就在城南仓库”这句关键台词不能漏掉；后续版本也必须检查",
+            )
 
 
 def _workspace(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
@@ -761,12 +967,12 @@ def _validation(repo: SQLiteRepository) -> None:
 def _about() -> None:
     st.markdown('<div class="panel"><div class="panel-title">现在能做什么，未来怎样进入视频审片？</div>'
                 '<div class="panel-note" style="font-size:14px;max-width:850px;margin-top:12px">'
-                '现在：导入自有剧本 → 提取人物事实 → 检查局部连续性 → 接收用户改稿意见 → '
-                '逐条确认规则 → 在后续版本自动复用。每个问题都能回到改稿原话和剧本行号。</div><hr>'
+                '现在：上传短剧成片 → 提取音轨并生成时间码 ASR → 与剧本台词对齐；同时提取人物事实、'
+                '检查局部连续性、接收编导纠正并在后续版本复用。音频问题可回到时间码，规则问题可回到反馈原话。</div><hr>'
                 '<div class="section-label">产品边界</div>'
-                '<div class="panel-note" style="font-size:13px">当前 Demo 是透明的确定性文本解析器，覆盖身份/知情、动作能力、'
-                '外观、情绪情境和道具连续性等明确模式，不声称理解任意表达。后续 ASR、字幕、音频和视频帧提取器会输出同一种证据对象，'
-                '因此可以沿用项目规则、版本和审计报告；当前页面不宣称已经完成视频理解。</div></div>',
+                '<div class="panel-note" style="font-size:13px">当前 Demo 已实现视频上传、音轨解码、中文 ASR 与剧本台词对齐；'
+                '音频无法可靠确认说话人身份，也不能判断画面里的动作、表情、服装和道具。上述视觉能力仍需镜头切分、角色跟踪与视觉模型，'
+                '因此当前产品准确表述为“视频音频审片 MVP”，而不是完整多模态审片。</div></div>',
                 unsafe_allow_html=True)
 
 
@@ -784,8 +990,10 @@ def main() -> None:
     repo, agent = _runtime(db_path)
     _sidebar(repo)
     _header()
-    nav = st.radio("导航", ["剧本审计", "项目规则", "固定评测", "用户验证", "演进路线"], horizontal=True, label_visibility="collapsed")
-    if nav == "剧本审计":
+    nav = st.radio("导航", ["视频音频审片", "剧本审计", "项目规则", "固定评测", "用户验证", "演进路线"], horizontal=True, label_visibility="collapsed")
+    if nav == "视频音频审片":
+        _audio_review(repo, agent)
+    elif nav == "剧本审计":
         _workspace(repo, agent)
     elif nav == "项目规则":
         _rule_library(repo, agent)
