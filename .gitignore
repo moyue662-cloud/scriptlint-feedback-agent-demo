@@ -1,0 +1,90 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ===== Virtual environments =====
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ===== Environment / secrets =====
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+secrets.json
+
+# ===== SQLite =====
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# ===== Streamlit =====
+.streamlit/secrets.toml
+
+# ===== Testing / coverage =====
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# ===== IDE / editor =====
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ===== Project: cached model outputs / eval artifacts =====
+eval/results/
+eval/output/
+*.log
+.cache/
+.claude/
+HANDOFF.md
+DecisionPatch_*
+
+# Public demo uploads / generated packages
+uploads/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.m4a
+*.srt
+*.vtt
+*.zip

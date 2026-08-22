@@ -1,0 +1,248 @@
+{
+  "schema_version": "1.0",
+  "data_label": "人工构造 · Eval",
+  "rules": [
+    {
+      "id": "rule_identity_forbid",
+      "team_id": "team_eval",
+      "project_id": "project_eval",
+      "rule_type": "identity_knowledge",
+      "title": "前三集禁止女主获知男主身份",
+      "subject": "女主",
+      "action": "identity_reveal",
+      "effect": "forbid",
+      "requirement": "第1到3集不得向女主揭示男主是集团继承人",
+      "severity": "hard",
+      "episode_from": 1,
+      "episode_to": 3,
+      "source_feedback_id": "feedback_identity",
+      "source_excerpt": "女主在第1到3集不能知道男主是集团继承人。",
+      "confidence": 0.96,
+      "status": "active",
+      "created_at": "2026-08-22T14:00:00+08:00"
+    },
+    {
+      "id": "rule_identity_require",
+      "team_id": "team_eval",
+      "project_id": "project_eval",
+      "rule_type": "identity_knowledge",
+      "title": "第三集必须揭示身份",
+      "subject": "女主",
+      "action": "identity_reveal",
+      "effect": "require",
+      "requirement": "第三集必须让女主获知男主真实身份",
+      "severity": "hard",
+      "episode_from": 3,
+      "episode_to": 3,
+      "source_feedback_id": "feedback_identity_required",
+      "source_excerpt": "第三集结尾必须揭示身份。",
+      "confidence": 0.94,
+      "status": "active",
+      "created_at": "2026-08-22T14:01:00+08:00"
+    },
+    {
+      "id": "rule_dialogue_forbid",
+      "team_id": "team_eval",
+      "project_id": "project_eval",
+      "rule_type": "dialogue",
+      "title": "男主避免长篇解释",
+      "subject": "男主",
+      "action": "long_dialogue",
+      "effect": "forbid",
+      "requirement": "前五集男主不得连续长篇解释背景",
+      "severity": "soft",
+      "episode_from": 1,
+      "episode_to": 5,
+      "source_feedback_id": "feedback_dialogue",
+      "source_excerpt": "男主前五集不要大段解释背景。",
+      "confidence": 0.91,
+      "status": "active",
+      "created_at": "2026-08-22T14:02:00+08:00"
+    },
+    {
+      "id": "rule_candidate_only",
+      "team_id": "team_eval",
+      "project_id": "project_eval",
+      "rule_type": "style",
+      "title": "候选风格规则",
+      "subject": "女主",
+      "action": "identity_reveal",
+      "effect": "forbid",
+      "requirement": "这条规则尚未确认",
+      "severity": "preference",
+      "episode_from": 1,
+      "episode_to": 3,
+      "source_feedback_id": "feedback_candidate",
+      "source_excerpt": "这只是一个未确认的想法。",
+      "confidence": 0.62,
+      "status": "candidate",
+      "created_at": "2026-08-22T14:03:00+08:00"
+    },
+    {
+      "id": "rule_foreign_project",
+      "team_id": "team_eval",
+      "project_id": "project_foreign",
+      "rule_type": "identity_knowledge",
+      "title": "其他项目的身份规则",
+      "subject": "女主",
+      "action": "identity_reveal",
+      "effect": "forbid",
+      "requirement": "其他项目的规则不得泄漏",
+      "severity": "hard",
+      "episode_from": 1,
+      "episode_to": 3,
+      "source_feedback_id": "feedback_foreign",
+      "source_excerpt": "这是另一个项目的规则。",
+      "confidence": 0.99,
+      "status": "active",
+      "created_at": "2026-08-22T14:04:00+08:00"
+    }
+  ],
+  "cases": [
+    {
+      "id": "identity_violation_ep1",
+      "category": "should_apply",
+      "task": {
+        "id": "task_identity_ep1",
+        "team_id": "team_eval",
+        "project_id": "project_eval",
+        "episode": 1,
+        "title": "第一集身份揭示",
+        "script_text": "女主：原来你是集团继承人。",
+        "facts": [{"id":"f1","project_id":"project_eval","episode":1,"scene_id":"s1","subject":"女主","action":"identity_reveal","statement":"女主获知身份","evidence_id":"e1","evidence_excerpt":"女主：原来你是集团继承人。"}]
+      },
+      "rule_ids": ["rule_identity_forbid"],
+      "expected_applied": ["rule_identity_forbid"],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": ["rule_violation"]
+    },
+    {
+      "id": "identity_violation_ep3",
+      "category": "should_apply",
+      "task": {
+        "id": "task_identity_ep3",
+        "team_id": "team_eval",
+        "project_id": "project_eval",
+        "episode": 3,
+        "title": "第三集身份揭示",
+        "script_text": "女主得知男主是集团继承人。",
+        "facts": [{"id":"f2","project_id":"project_eval","episode":3,"scene_id":"s2","subject":"女主","action":"identity_reveal","statement":"女主获知身份","evidence_id":"e2","evidence_excerpt":"女主得知男主是集团继承人。"}]
+      },
+      "rule_ids": ["rule_identity_forbid"],
+      "expected_applied": ["rule_identity_forbid"],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": ["rule_violation"]
+    },
+    {
+      "id": "identity_out_of_scope_ep4",
+      "category": "should_ignore",
+      "task": {
+        "id": "task_identity_ep4",
+        "team_id": "team_eval",
+        "project_id": "project_eval",
+        "episode": 4,
+        "title": "第四集身份揭示",
+        "script_text": "女主得知男主是集团继承人。",
+        "facts": [{"id":"f3","project_id":"project_eval","episode":4,"scene_id":"s3","subject":"女主","action":"identity_reveal","statement":"女主获知身份","evidence_id":"e3","evidence_excerpt":"女主得知男主是集团继承人。"}]
+      },
+      "rule_ids": ["rule_identity_forbid"],
+      "expected_applied": [],
+      "expected_ignored": ["rule_identity_forbid"],
+      "expected_conflicted": [],
+      "expected_findings": []
+    },
+    {
+      "id": "identity_absent_ok",
+      "category": "should_apply_no_violation",
+      "task": {"id":"task_identity_absent","team_id":"team_eval","project_id":"project_eval","episode":2,"title":"第二集无身份揭示","script_text":"女主独自在便利店整理货架。","facts":[]},
+      "rule_ids": ["rule_identity_forbid"],
+      "expected_applied": ["rule_identity_forbid"],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": []
+    },
+    {
+      "id": "required_identity_present",
+      "category": "required_present",
+      "task": {
+        "id": "task_required_present",
+        "team_id": "team_eval",
+        "project_id": "project_eval",
+        "episode": 3,
+        "title": "第三集按要求揭示",
+        "script_text": "女主得知男主是集团继承人。",
+        "facts": [{"id":"f4","project_id":"project_eval","episode":3,"scene_id":"s4","subject":"女主","action":"identity_reveal","statement":"女主获知身份","evidence_id":"e4","evidence_excerpt":"女主得知男主是集团继承人。"}]
+      },
+      "rule_ids": ["rule_identity_require"],
+      "expected_applied": ["rule_identity_require"],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": []
+    },
+    {
+      "id": "required_identity_missing",
+      "category": "required_missing",
+      "task": {"id":"task_required_missing","team_id":"team_eval","project_id":"project_eval","episode":3,"title":"第三集遗漏身份揭示","script_text":"女主独自离开便利店。","facts":[]},
+      "rule_ids": ["rule_identity_require"],
+      "expected_applied": ["rule_identity_require"],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": ["rule_violation"]
+    },
+    {
+      "id": "confirmed_rule_conflict",
+      "category": "rule_conflict",
+      "task": {"id":"task_conflict","team_id":"team_eval","project_id":"project_eval","episode":3,"title":"第三集相反规则","script_text":"女主得知男主是集团继承人。","facts":[]},
+      "rule_ids": ["rule_identity_forbid", "rule_identity_require"],
+      "expected_applied": [],
+      "expected_ignored": [],
+      "expected_conflicted": ["rule_identity_forbid", "rule_identity_require"],
+      "expected_findings": ["rule_conflict"]
+    },
+    {
+      "id": "dialogue_violation",
+      "category": "should_apply",
+      "task": {
+        "id":"task_dialogue_violation","team_id":"team_eval","project_id":"project_eval","episode":2,"title":"男主长篇解释","script_text":"男主连续解释家族背景。",
+        "facts":[{"id":"f5","project_id":"project_eval","episode":2,"scene_id":"s5","subject":"男主","action":"long_dialogue","statement":"男主连续长篇解释背景","evidence_id":"e5","evidence_excerpt":"男主连续解释家族背景。"}]
+      },
+      "rule_ids": ["rule_dialogue_forbid"],
+      "expected_applied": ["rule_dialogue_forbid"],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": ["rule_violation"]
+    },
+    {
+      "id": "dialogue_absent_ok",
+      "category": "should_apply_no_violation",
+      "task": {"id":"task_dialogue_absent","team_id":"team_eval","project_id":"project_eval","episode":2,"title":"男主保持沉默","script_text":"男主沉默地递出雨伞。","facts":[]},
+      "rule_ids": ["rule_dialogue_forbid"],
+      "expected_applied": ["rule_dialogue_forbid"],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": []
+    },
+    {
+      "id": "candidate_must_not_apply",
+      "category": "confirmation_gate",
+      "task": {"id":"task_candidate","team_id":"team_eval","project_id":"project_eval","episode":2,"title":"候选规则门禁","script_text":"女主得知男主是集团继承人。","facts":[]},
+      "rule_ids": ["rule_candidate_only"],
+      "expected_applied": [],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": []
+    },
+    {
+      "id": "foreign_project_must_not_apply",
+      "category": "project_isolation",
+      "task": {"id":"task_foreign","team_id":"team_eval","project_id":"project_eval","episode":2,"title":"跨项目隔离","script_text":"女主得知男主是集团继承人。","facts":[]},
+      "rule_ids": ["rule_foreign_project"],
+      "expected_applied": [],
+      "expected_ignored": [],
+      "expected_conflicted": [],
+      "expected_findings": []
+    }
+  ]
+}

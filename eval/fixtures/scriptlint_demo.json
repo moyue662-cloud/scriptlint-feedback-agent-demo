@@ -1,0 +1,192 @@
+{
+  "schema_version": "1.0",
+  "data_label": "人工构造 · Demo",
+  "team_id": "team_scriptlint_demo",
+  "project_id": "project_rain_store",
+  "project_name": "《雨夜便利店》（人工构造）",
+  "feedback": {
+    "id": "feedback_001",
+    "speaker": "演示用户",
+    "original_result": "系统未发现身份揭示问题",
+    "user_text": "这次判断不对。女主在第1到3集不能知道男主是集团继承人，这条规则只限制女主。"
+  },
+  "candidate_rules": [
+    {
+      "id": "rule_017",
+      "team_id": "team_scriptlint_demo",
+      "project_id": "project_rain_store",
+      "rule_type": "identity_knowledge",
+      "title": "前三集禁止女主获知男主身份",
+      "subject": "女主",
+      "action": "identity_reveal",
+      "effect": "forbid",
+      "requirement": "第1到3集不得向女主明确揭示男主是集团继承人",
+      "severity": "hard",
+      "episode_from": 1,
+      "episode_to": 3,
+      "source_feedback_id": "feedback_001",
+      "source_excerpt": "女主在第1到3集不能知道男主是集团继承人，这条规则只限制女主。",
+      "confidence": 0.96,
+      "status": "candidate",
+      "version": 1
+    }
+  ],
+  "confirmed_rules": [
+    {
+      "id": "rule_017",
+      "team_id": "team_scriptlint_demo",
+      "project_id": "project_rain_store",
+      "rule_type": "identity_knowledge",
+      "title": "前三集禁止女主获知男主身份",
+      "subject": "女主",
+      "action": "identity_reveal",
+      "effect": "forbid",
+      "requirement": "第1到3集不得向女主明确揭示男主是集团继承人",
+      "severity": "hard",
+      "episode_from": 1,
+      "episode_to": 3,
+      "source_feedback_id": "feedback_001",
+      "source_excerpt": "女主在第1到3集不能知道男主是集团继承人，这条规则只限制女主。",
+      "confidence": 0.96,
+      "status": "active",
+      "version": 1
+    },
+    {
+      "id": "rule_018",
+      "team_id": "team_scriptlint_demo",
+      "project_id": "project_rain_store",
+      "rule_type": "identity_knowledge",
+      "title": "第三集结尾必须揭示男主身份",
+      "subject": "女主",
+      "action": "identity_reveal",
+      "effect": "require",
+      "requirement": "第三集结尾必须让女主明确获知男主是集团继承人",
+      "severity": "hard",
+      "episode_from": 3,
+      "episode_to": 3,
+      "source_feedback_id": "feedback_002",
+      "source_excerpt": "第三集结尾必须让女主明确说出男主的真实身份。",
+      "confidence": 0.94,
+      "status": "active",
+      "version": 1
+    }
+  ],
+  "cases": [
+    {
+      "id": "case_no_memory",
+      "description": "同一任务在没有反馈记忆时不产生规则审计结论",
+      "task": {
+        "id": "task_episode_3_no_memory",
+        "team_id": "team_scriptlint_demo",
+        "project_id": "project_rain_store",
+        "episode": 3,
+        "title": "第3集身份揭示审计（无记忆）",
+        "script_text": "女主：你就是那个集团继承人！",
+        "facts": [
+          {
+            "id": "fact_001",
+            "project_id": "project_rain_store",
+            "episode": 3,
+            "scene_id": "scene_02",
+            "subject": "女主",
+            "action": "identity_reveal",
+            "statement": "女主在第3集明确说出男主的真实身份",
+            "evidence_id": "scene_02_line_18",
+            "evidence_excerpt": "女主：你就是那个集团继承人！"
+          }
+        ]
+      },
+      "rule_ids": [],
+      "expected_applied_rule_ids": [],
+      "expected_ignored_rule_ids": [],
+      "expected_finding_types": []
+    },
+    {
+      "id": "case_memory_applies",
+      "description": "确认反馈记忆后，同一类第3集任务应触发规则违例",
+      "task": {
+        "id": "task_episode_3_with_memory",
+        "team_id": "team_scriptlint_demo",
+        "project_id": "project_rain_store",
+        "episode": 3,
+        "title": "第3集身份揭示审计（已确认记忆）",
+        "script_text": "女主：你就是那个集团继承人！",
+        "facts": [
+          {
+            "id": "fact_001",
+            "project_id": "project_rain_store",
+            "episode": 3,
+            "scene_id": "scene_02",
+            "subject": "女主",
+            "action": "identity_reveal",
+            "statement": "女主在第3集明确说出男主的真实身份",
+            "evidence_id": "scene_02_line_18",
+            "evidence_excerpt": "女主：你就是那个集团继承人！"
+          }
+        ]
+      },
+      "rule_ids": ["rule_017"],
+      "expected_applied_rule_ids": ["rule_017"],
+      "expected_ignored_rule_ids": [],
+      "expected_finding_types": ["rule_violation"]
+    },
+    {
+      "id": "case_memory_ignored_out_of_scope",
+      "description": "第4集超出规则范围，系统必须解释为何忽略",
+      "task": {
+        "id": "task_episode_4_out_of_scope",
+        "team_id": "team_scriptlint_demo",
+        "project_id": "project_rain_store",
+        "episode": 4,
+        "title": "第4集身份揭示审计（范围外）",
+        "script_text": "女主：原来你一直隐瞒的是继承人身份。",
+        "facts": [
+          {
+            "id": "fact_002",
+            "project_id": "project_rain_store",
+            "episode": 4,
+            "scene_id": "scene_01",
+            "subject": "女主",
+            "action": "identity_reveal",
+            "statement": "女主在第4集明确获知男主身份",
+            "evidence_id": "scene_01_line_09",
+            "evidence_excerpt": "女主：原来你一直隐瞒的是继承人身份。"
+          }
+        ]
+      },
+      "rule_ids": ["rule_017"],
+      "expected_applied_rule_ids": [],
+      "expected_ignored_rule_ids": ["rule_017"],
+      "expected_finding_types": []
+    },
+    {
+      "id": "case_rule_conflict",
+      "description": "两条已确认规则在第3集对同一动作提出相反要求",
+      "task": {
+        "id": "task_episode_3_conflict",
+        "team_id": "team_scriptlint_demo",
+        "project_id": "project_rain_store",
+        "episode": 3,
+        "title": "第3集主创规则冲突",
+        "script_text": "女主：你就是那个集团继承人！",
+        "facts": [
+          {
+            "id": "fact_001",
+            "project_id": "project_rain_store",
+            "episode": 3,
+            "scene_id": "scene_02",
+            "subject": "女主",
+            "action": "identity_reveal",
+            "statement": "女主在第3集明确说出男主的真实身份",
+            "evidence_id": "scene_02_line_18",
+            "evidence_excerpt": "女主：你就是那个集团继承人！"
+          }
+        ]
+      },
+      "rule_ids": ["rule_017", "rule_018"],
+      "expected_applied_rule_ids": [],
+      "expected_ignored_rule_ids": [],
+      "expected_finding_types": ["rule_conflict"]
+    }
+  ]
+}
