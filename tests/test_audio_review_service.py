@@ -19,6 +19,7 @@ from services.audio_review_service import (
     extract_audio_track,
     extract_script_dialogues,
     normalize_dialogue,
+    parse_script_dialogues,
 )
 
 
@@ -41,6 +42,56 @@ def test_extract_script_dialogues_keeps_speaker_and_line_number():
         (2, "林夏", "账本在仓库。"),
         (3, "周远", "我现在就去。"),
     ]
+
+
+def test_markdown_metadata_title_and_character_background_are_not_dialogue():
+    script = """## PandaSuite 全文动画剧本
+> 本稿根据当前项目中的剧情整理而成。
+
+## 一、作品信息
+- 类型：熊猫头表情包沙雕动画 / 职场黑色幽默 / AI 产品与哲学讽刺
+- 原作：《哲学废物进了大模型公司》
+- 动画结构：10 个连续 Scene
+- 当前编译时长：约 333 秒
+- 当前画面规格：1280x720
+- 核心人物：陆衡、赵启明、顾晚
+- 核心主题：模型说出一句话之前，先判断有没有证据。
+- 核心反转：高分不等于安全。
+
+## 二、人物设定
+### 陆衡
+哲学背景，进入大模型公司做评测与对齐。
+
+## 三、正文
+陆衡：我只是想先确认这句话有没有证据。
+赵启明（冷笑）：你又在浪费时间。
+旁白：会议室突然安静下来。"""
+
+    result = parse_script_dialogues(script)
+
+    assert [(row.speaker, row.text) for row in result.dialogues] == [
+        ("陆衡", "我只是想先确认这句话有没有证据。"),
+        ("赵启明", "你又在浪费时间。"),
+        ("旁白", "会议室突然安静下来。"),
+    ]
+    assert "陆衡" in result.discovered_characters
+    ignored = {row.label: row for row in result.ignored_lines}
+    assert "类型" in ignored
+    assert "原作" in ignored
+    assert "动画结构" in ignored
+    assert all(row.line_number < 19 for row in result.ignored_lines)
+
+
+def test_metadata_labels_are_excluded_even_without_markdown_section():
+    result = parse_script_dialogues(
+        "剧名：《雨夜便利店》\n场景1：会议室 日 内\n- 林夏：账本在仓库。\n**周远**：我现在就去。"
+    )
+
+    assert [(row.speaker, row.text) for row in result.dialogues] == [
+        ("林夏", "账本在仓库。"),
+        ("周远", "我现在就去。"),
+    ]
+    assert [row.label for row in result.ignored_lines] == ["剧名", "场景1"]
 
 
 def test_normalize_dialogue_removes_punctuation_but_keeps_meaningful_text():
@@ -119,7 +170,7 @@ def test_review_video_builds_report_with_hash_and_quality(monkeypatch, tmp_path)
     report = AudioReviewService(_FakeTranscriber()).review_video(
         video_path=video_path,
         wav_path=wav_path,
-        script_text="林夏：账本在仓库。",
+        script_text="类型：悬疑短剧\n林夏：账本在仓库。",
         source_name="clip.mp4",
         created_at=datetime(2026, 8, 22, tzinfo=timezone.utc),
     )
@@ -128,6 +179,7 @@ def test_review_video_builds_report_with_hash_and_quality(monkeypatch, tmp_path)
     assert report.missing_count == 0
     assert report.quality == expected_quality
     assert report.detected_language == "zh"
+    assert report.ignored_script_lines[0].label == "类型"
     assert len(report.content_hash) == 64
     assert len(report.script_hash) == 64
 

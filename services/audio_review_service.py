@@ -23,6 +23,8 @@ from schemas.multimodal import (
     AudioReviewReport,
     DialogueAlignment,
     DialogueMatchStatus,
+    IgnoredScriptLine,
+    ScriptDialogueParseResult,
     ScriptDialogueLine,
     TranscriptSegment,
 )
@@ -31,6 +33,74 @@ from schemas.multimodal import (
 MAX_VIDEO_BYTES = 200 * 1024 * 1024
 MAX_AUDIO_DURATION_SECONDS = 12 * 60
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+
+_NON_DIALOGUE_SECTIONS = {
+    "作品信息",
+    "项目信息",
+    "基本信息",
+    "人物设定",
+    "角色设定",
+    "人物介绍",
+    "角色介绍",
+    "创作说明",
+    "剧本说明",
+    "故事简介",
+    "剧情梗概",
+    "世界观",
+    "背景介绍",
+    "前言",
+    "使用说明",
+}
+_CHARACTER_SECTIONS = {"人物设定", "角色设定", "人物介绍", "角色介绍"}
+_CHARACTER_LIST_LABELS = {"核心人物", "主要人物", "登场人物", "角色列表", "人物"}
+_NON_DIALOGUE_LABELS = {
+    "类型",
+    "题材",
+    "原作",
+    "改编",
+    "剧名",
+    "片名",
+    "标题",
+    "作品名",
+    "动画结构",
+    "当前编译时长",
+    "当前画面规格",
+    "核心人物",
+    "主要人物",
+    "登场人物",
+    "角色列表",
+    "核心主题",
+    "核心反转",
+    "时长",
+    "画面规格",
+    "分辨率",
+    "集数",
+    "版本",
+    "场景",
+    "地点",
+    "时间",
+    "镜头",
+    "画面",
+    "动作",
+    "表情",
+    "音效",
+    "bgm",
+    "sfx",
+    "字幕",
+    "道具",
+    "服装",
+    "备注",
+    "说明",
+    "制作说明",
+    "导演说明",
+    "镜头说明",
+    "故事梗概",
+    "剧情梗概",
+    "背景介绍",
+    "情景介绍",
+    "场景介绍",
+}
+_VOICE_ROLES = {"旁白", "画外音", "内心独白", "系统音", "系统", "众人", "广播"}
 
 
 class AudioReviewError(RuntimeError):
@@ -94,19 +164,58 @@ class FasterWhisperTranscriber:
         )
 
 
-def extract_script_dialogues(script_text: str) -> list[ScriptDialogueLine]:
-    """提取“角色：台词”，保留剧本行号。"""
-    rows: list[ScriptDialogueLine] = []
-    for line_number, raw in enumerate(script_text.splitlines(), start=1):
-        line = raw.strip()
-        match = re.match(r"^([^：:]{1,30})[：:]\s*(.+)$", line)
+def parse_script_dialogues(script_text: str) -> ScriptDialogueParseResult:
+    """按 Markdown 章节和字段语义提取“角色：台词”，并保留排除依据。"""
+    lines = script_text.splitlines()
+    discovered_characters = _discover_characters(lines)
+    dialogues: list[ScriptDialogueLine] = []
+    ignored_lines: list[IgnoredScriptLine] = []
+    current_section = ""
+
+    for line_number, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        heading = _markdown_heading(stripped)
+        if heading:
+            level, title = heading
+            if level <= 2:
+                current_section = title
+            continue
+        if not stripped:
+            continue
+
+        is_quote = stripped.startswith(">")
+        candidate = re.sub(r"^(?:[-*+]\s+|>\s*)", "", stripped).strip()
+        match = re.match(r"^([^：:]{1,40})[：:]\s*(.+)$", candidate)
         if not match:
             continue
-        speaker = re.sub(r"[（(].*?[）)]", "", match.group(1)).strip()
+
+        raw_label = _clean_markdown(match.group(1))
         text = match.group(2).strip()
-        if not speaker or not text:
+        speaker = re.sub(r"[（(][^）)]*[）)]", "", raw_label).strip()
+        normalized_label = re.sub(r"\s+", "", speaker).lower()
+
+        reason: str | None = None
+        if is_quote:
+            reason = "Markdown 引用/说明文字，不作为成片台词"
+        elif _section_is_non_dialogue(current_section):
+            reason = f"位于“{current_section}”说明章节，不作为成片台词"
+        elif _is_non_dialogue_label(normalized_label):
+            reason = f"“{speaker}”是作品元数据或制作字段，不是角色名"
+        elif not _plausible_speaker(speaker, discovered_characters):
+            reason = "冒号前内容不像角色名，按情景或背景说明排除"
+
+        if reason:
+            ignored_lines.append(
+                IgnoredScriptLine(
+                    line_number=line_number,
+                    text=stripped,
+                    label=speaker or None,
+                    reason=reason,
+                )
+            )
             continue
-        rows.append(
+
+        dialogues.append(
             ScriptDialogueLine(
                 id=f"script_dialogue_{line_number}",
                 line_number=line_number,
@@ -114,7 +223,94 @@ def extract_script_dialogues(script_text: str) -> list[ScriptDialogueLine]:
                 text=text,
             )
         )
-    return rows
+
+    return ScriptDialogueParseResult(
+        dialogues=dialogues,
+        ignored_lines=ignored_lines,
+        discovered_characters=sorted(discovered_characters),
+    )
+
+
+def extract_script_dialogues(script_text: str) -> list[ScriptDialogueLine]:
+    """兼容旧调用：只返回结构化解析结果中的台词。"""
+    return parse_script_dialogues(script_text).dialogues
+
+
+def _discover_characters(lines: list[str]) -> set[str]:
+    characters: set[str] = set()
+    current_section = ""
+    for raw in lines:
+        stripped = raw.strip()
+        heading = _markdown_heading(stripped)
+        if heading:
+            level, title = heading
+            if level <= 2:
+                current_section = title
+            elif level >= 3 and _section_matches(current_section, _CHARACTER_SECTIONS):
+                name = _clean_markdown(title).strip()
+                if _basic_speaker_shape(name):
+                    characters.add(name)
+            continue
+        candidate = re.sub(r"^(?:[-*+]\s+|>\s*)", "", stripped).strip()
+        match = re.match(r"^([^：:]{1,20})[：:]\s*(.+)$", candidate)
+        if not match:
+            continue
+        label = re.sub(r"\s+", "", _clean_markdown(match.group(1)))
+        if label not in _CHARACTER_LIST_LABELS:
+            continue
+        for name in re.split(r"[、,，/；;\s]+", match.group(2)):
+            name = _clean_markdown(name).strip()
+            if _basic_speaker_shape(name):
+                characters.add(name)
+    return characters
+
+
+def _markdown_heading(line: str) -> tuple[int, str] | None:
+    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+    if not match:
+        return None
+    return len(match.group(1)), _clean_markdown(match.group(2)).strip()
+
+
+def _clean_markdown(value: str) -> str:
+    return re.sub(r"[*_`~]", "", value).strip()
+
+
+def _section_matches(section: str, options: set[str]) -> bool:
+    compact = re.sub(r"[\s一二三四五六七八九十0-9、.．:：()（）]+", "", section)
+    return any(option in compact for option in options)
+
+
+def _section_is_non_dialogue(section: str) -> bool:
+    return _section_matches(section, _NON_DIALOGUE_SECTIONS)
+
+
+def _is_non_dialogue_label(label: str) -> bool:
+    if label in _NON_DIALOGUE_LABELS:
+        return True
+    return any(
+        label.startswith(prefix)
+        for prefix in ("场景", "镜头", "画面", "时间", "地点", "备注", "说明")
+    )
+
+
+def _basic_speaker_shape(speaker: str) -> bool:
+    if not speaker or len(speaker) > 12:
+        return False
+    if re.search(r"[，。！？；;/《》【】\[\]{}]", speaker):
+        return False
+    return not bool(re.search(r"\s{2,}", speaker))
+
+
+def _plausible_speaker(speaker: str, discovered_characters: set[str]) -> bool:
+    if not _basic_speaker_shape(speaker):
+        return False
+    if speaker in _VOICE_ROLES or speaker in discovered_characters:
+        return True
+    # 没有角色表的普通剧本仍可直接使用；句式化前缀则视为说明。
+    if re.search(r"(介绍|背景|设定|说明|结构|主题|反转|规格|时长|画面|镜头)$", speaker):
+        return False
+    return True
 
 
 def normalize_dialogue(text: str) -> str:
@@ -285,7 +481,8 @@ class AudioReviewService:
         started = time.perf_counter()
         quality = extract_audio_track(video_path, wav_path)
         transcription = self._transcriber.transcribe(wav_path)
-        script_dialogues = extract_script_dialogues(script_text)
+        parse_result = parse_script_dialogues(script_text)
+        script_dialogues = parse_result.dialogues
         alignments, overall_similarity = align_dialogues(
             script_dialogues, transcription.segments
         )
@@ -303,6 +500,7 @@ class AudioReviewService:
             language_probability=transcription.language_probability,
             transcript_segments=transcription.segments,
             script_dialogues=script_dialogues,
+            ignored_script_lines=parse_result.ignored_lines,
             alignments=alignments,
             overall_similarity=overall_similarity,
             matched_count=counts[DialogueMatchStatus.matched],

@@ -37,6 +37,7 @@ from services.audio_review_service import (
     AudioReviewService,
     FasterWhisperTranscriber,
     MAX_VIDEO_BYTES,
+    parse_script_dialogues,
 )
 
 
@@ -593,6 +594,48 @@ def _clear_audio_result() -> None:
     st.session_state.pop("audio_script_result", None)
 
 
+def _render_dialogue_preview(script_text: str) -> None:
+    if not script_text.strip():
+        return
+    parsed = parse_script_dialogues(script_text)
+    character_note = "、".join(parsed.discovered_characters) or "未从人物表发现，按角色名形态判断"
+    if parsed.dialogues:
+        st.success(
+            f"台词预检：将 {len(parsed.dialogues)} 行送入音频对齐；"
+            f"排除 {len(parsed.ignored_lines)} 行说明/元数据。"
+        )
+    else:
+        st.warning("台词预检没有找到可对齐台词。请使用“角色：台词”格式，并检查正文所在章节。")
+    st.caption(f"从人物设定发现的角色：{character_note}")
+    with st.expander("检查系统将哪些行视为台词", expanded=not bool(parsed.dialogues)):
+        if parsed.dialogues:
+            st.dataframe(
+                [
+                    {"行号": row.line_number, "说话角色": row.speaker, "台词": row.text}
+                    for row in parsed.dialogues
+                ],
+                hide_index=True,
+                **_stretch(st.dataframe),
+            )
+        else:
+            st.caption("暂无被纳入的台词行。")
+    if parsed.ignored_lines:
+        with st.expander(f"查看已排除的说明/元数据（{len(parsed.ignored_lines)} 行）"):
+            st.dataframe(
+                [
+                    {
+                        "行号": row.line_number,
+                        "原文": row.text,
+                        "识别标签": row.label or "—",
+                        "排除原因": row.reason,
+                    }
+                    for row in parsed.ignored_lines
+                ],
+                hide_index=True,
+                **_stretch(st.dataframe),
+            )
+
+
 def _render_audio_report(report: AudioReviewReport) -> None:
     st.markdown("<div class='section-label'>音轨—剧本审计结果</div>", unsafe_allow_html=True)
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -655,6 +698,20 @@ def _render_audio_report(report: AudioReviewReport) -> None:
         )
     with st.expander("查看音轨质量指标"):
         st.json(report.quality.model_dump(mode="json"))
+    if report.ignored_script_lines:
+        with st.expander(f"本轮未参与音频对齐的说明/元数据（{len(report.ignored_script_lines)} 行）"):
+            st.dataframe(
+                [
+                    {
+                        "行号": row.line_number,
+                        "原文": row.text,
+                        "排除原因": row.reason,
+                    }
+                    for row in report.ignored_script_lines
+                ],
+                hide_index=True,
+                **_stretch(st.dataframe),
+            )
     st.download_button(
         "下载审片 JSON 报告",
         data=json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
@@ -687,6 +744,7 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         placeholder="必须包含“角色：台词”格式，例如：林夏：账本在仓库。",
         on_change=_clear_audio_result,
     )
+    _render_dialogue_preview(st.session_state.get("script_input", ""))
     video = st.file_uploader(
         "上传短剧成片",
         type=["mp4", "mov", "mkv", "webm", "avi", "m4v"],

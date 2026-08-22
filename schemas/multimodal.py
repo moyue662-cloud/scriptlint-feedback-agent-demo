@@ -89,6 +89,21 @@ class ScriptDialogueLine(BaseModel):
     text: str
 
 
+class IgnoredScriptLine(BaseModel):
+    """含冒号但被判定为非台词的剧本行，供用户预检。"""
+
+    line_number: int = Field(ge=1)
+    text: str
+    label: str | None = None
+    reason: str
+
+
+class ScriptDialogueParseResult(BaseModel):
+    dialogues: list[ScriptDialogueLine]
+    ignored_lines: list[IgnoredScriptLine]
+    discovered_characters: list[str] = Field(default_factory=list)
+
+
 class DialogueMatchStatus(str, Enum):
     matched = "matched"
     changed = "changed"
@@ -132,6 +147,7 @@ class AudioReviewReport(BaseModel):
     language_probability: float | None = Field(default=None, ge=0, le=1)
     transcript_segments: list[TranscriptSegment]
     script_dialogues: list[ScriptDialogueLine]
+    ignored_script_lines: list[IgnoredScriptLine] = Field(default_factory=list)
     alignments: list[DialogueAlignment]
     overall_similarity: float = Field(ge=0, le=1)
     matched_count: int = Field(ge=0)

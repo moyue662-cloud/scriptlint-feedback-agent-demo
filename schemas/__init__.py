@@ -67,11 +67,13 @@ from .multimodal import (
     DialogueAlignment,
     DialogueMatchStatus,
     EvidenceLocator,
+    IgnoredScriptLine,
     ReviewAsset,
     ReviewEvidence,
     ReviewModality,
     ReviewObservation,
     ScriptDialogueLine,
+    ScriptDialogueParseResult,
     TranscriptSegment,
 )
 from .evaluation import (
@@ -123,6 +125,8 @@ __all__ = [
     "ReviewObservation",
     "TranscriptSegment",
     "ScriptDialogueLine",
+    "IgnoredScriptLine",
+    "ScriptDialogueParseResult",
     "DialogueMatchStatus",
     "DialogueAlignment",
     "AudioQualityMetrics",

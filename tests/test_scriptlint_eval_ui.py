@@ -122,3 +122,22 @@ def test_audio_review_is_homepage_and_requires_video(tmp_path, monkeypatch):
     ).click().run(timeout=20)
     assert not app.exception
     assert any("请先上传视频文件" in item.value for item in app.warning)
+
+
+def test_audio_review_previews_dialogue_and_excludes_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("DP_DB_PATH", str(tmp_path / "scriptlint_audio_preview_ui.db"))
+    app = AppTest.from_file(str(APP_PATH)).run(timeout=20)
+    script = """## 一、作品信息
+- 类型：职场黑色幽默
+- 原作：《哲学废物进了大模型公司》
+## 二、正文
+陆衡：先确认这句话有没有证据。
+旁白：会议室安静下来。"""
+
+    next(item for item in app.text_area if item.label == "对照剧本").set_value(script).run(
+        timeout=20
+    )
+
+    assert not app.exception
+    assert any("将 2 行送入音频对齐；排除 2 行" in item.value for item in app.success)
+    assert len(app.dataframe) == 2
