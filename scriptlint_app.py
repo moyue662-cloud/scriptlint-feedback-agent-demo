@@ -151,6 +151,27 @@ def _subtitle_reader(schema_epoch: str) -> RapidOcrSubtitleReader:
     return RapidOcrSubtitleReader()
 
 
+@st.cache_data(show_spinner=False)
+def _ocr_runtime_probe(schema_epoch: str) -> tuple[bool, str]:
+    """只验证 OCR 导入链，不提前加载模型。"""
+    del schema_epoch
+    try:
+        import cv2
+        import onnxruntime
+        import rapidocr
+        from rapidocr import RapidOCR
+
+        if RapidOCR is None:  # pragma: no cover - 防御异常安装
+            raise RuntimeError("RapidOCR 类不可用")
+        versions = (
+            f"RapidOCR {getattr(rapidocr, '__version__', '3.x')} · "
+            f"ONNXRuntime {onnxruntime.__version__} · OpenCV {cv2.__version__}"
+        )
+        return True, versions
+    except Exception as exc:  # pragma: no cover - 由部署运行时决定
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def _runtime_schema_epoch() -> str:
     """类被热更新后自动换缓存，防止新旧 Pydantic 对象混用。"""
     return ":".join(
@@ -852,11 +873,18 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         ["tiny", "base"],
         format_func=lambda value: "tiny｜最快，适合流程演示" if value == "tiny" else "base｜中文更稳，首次下载与识别更慢",
     )
+    schema_epoch = _runtime_schema_epoch()
+    ocr_ready, ocr_status = _ocr_runtime_probe(schema_epoch)
     use_subtitle_ocr = st.checkbox(
         "启用画面字幕 OCR 交叉确认",
-        value=True,
+        value=ocr_ready,
+        disabled=not ocr_ready,
         help="抽取视频下半屏硬字幕，与 ASR 和剧本三方比对；能降低同音字误报，但会增加处理时间。",
     )
+    if ocr_ready:
+        st.caption(f"● 字幕 OCR 运行环境就绪 · {ocr_status}")
+    else:
+        st.warning(f"字幕 OCR 暂不可用，本轮会自动使用纯音频审片。原因：{ocr_status}")
     run_audio = st.button(
         "提取音轨并对照剧本审核",
         type="primary",
@@ -884,13 +912,16 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
                         video_path = Path(temp_dir) / f"source{suffix}"
                         wav_path = Path(temp_dir) / "audio.wav"
                         video_path.write_bytes(video.getvalue())
+                        subtitle_reader = None
+                        ocr_startup_warning = None
+                        if use_subtitle_ocr:
+                            try:
+                                subtitle_reader = _subtitle_reader(schema_epoch)
+                            except AudioReviewError as exc:
+                                ocr_startup_warning = str(exc)
                         service = AudioReviewService(
-                            _asr_transcriber(model_name, _runtime_schema_epoch()),
-                            subtitle_reader=(
-                                _subtitle_reader(_runtime_schema_epoch())
-                                if use_subtitle_ocr
-                                else None
-                            ),
+                            _asr_transcriber(model_name, schema_epoch),
+                            subtitle_reader=subtitle_reader,
                         )
                         report = service.review_video(
                             video_path=video_path,
@@ -899,6 +930,8 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
                             source_name=video.name,
                             created_at=_now(),
                         )
+                        if ocr_startup_warning:
+                            report.ocr_warnings.insert(0, ocr_startup_warning)
                         st.session_state["audio_review_report"] = report
                         st.session_state["audio_script_result"] = _run(agent, _new_task())
             except AudioReviewError as exc:
