@@ -181,11 +181,13 @@ class RapidOcrSubtitleReader:
     def __init__(self, text_score: float = 0.5) -> None:
         try:
             from rapidocr import RapidOCR
-        except ImportError as exc:  # pragma: no cover - 由部署依赖决定
+            self._engine = RapidOCR()
+        except Exception as exc:  # pragma: no cover - 由部署运行时决定
             raise AudioReviewError(
-                "字幕 OCR 组件未安装，请安装 requirements.txt 后重启应用。"
+                "字幕 OCR 组件加载失败："
+                f"{type(exc).__name__}: {exc}。"
+                "请确认 Python 依赖与 Linux 图形运行库已安装后重启应用。"
             ) from exc
-        self._engine = RapidOCR()
         self._text_score = text_score
 
     def recognize(self, image: np.ndarray) -> list[tuple[str, float]]:
