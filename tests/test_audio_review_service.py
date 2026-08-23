@@ -94,6 +94,47 @@ def test_metadata_labels_are_excluded_even_without_markdown_section():
     assert [row.label for row in result.ignored_lines] == ["剧名", "场景1"]
 
 
+def test_markdown_speaker_cue_uses_following_paragraph_as_dialogue():
+    script = """## 三、正文
+**赵启明**（嘲讽，dismiss 动作）：
+
+走错了。大模型在对面，这边教的是存在是否存在。
+
+**顾晚：**
+
+陆衡是在这儿答辩吗？
+
+**赵启明**（得意，smug 表情，dismiss 动作）：
+
+澄思来挖哲学家？下个月是不是还要招占星的？"""
+
+    result = parse_script_dialogues(script)
+
+    assert [(row.line_number, row.speaker, row.text) for row in result.dialogues] == [
+        (4, "赵启明", "走错了。大模型在对面，这边教的是存在是否存在。"),
+        (8, "顾晚", "陆衡是在这儿答辩吗？"),
+        (12, "赵启明", "澄思来挖哲学家？下个月是不是还要招占星的？"),
+    ]
+    assert all(row.text != "**" for row in result.dialogues)
+
+
+def test_formatting_and_silence_symbols_never_become_dialogue():
+    script = """## 正文
+旁白：**
+
+***
+
+顾晚：——
+赵启明：真正说出口的内容。"""
+
+    result = parse_script_dialogues(script)
+
+    assert [(row.speaker, row.text) for row in result.dialogues] == [
+        ("赵启明", "真正说出口的内容。")
+    ]
+    assert {row.label for row in result.ignored_lines} == {"旁白", "顾晚"}
+
+
 def test_normalize_dialogue_removes_punctuation_but_keeps_meaningful_text():
     assert normalize_dialogue("账本，在 A-3 仓库！") == "账本在a3仓库"
 
