@@ -571,19 +571,34 @@ class AudioReviewService:
             model_name=self._transcriber.model_name,
             detected_language=transcription.language,
             language_probability=transcription.language_probability,
-            transcript_segments=transcription.segments,
-            script_dialogues=script_dialogues,
-            ignored_script_lines=parse_result.ignored_lines,
-            alignments=alignments,
+            # Streamlit 热更新可能让缓存的 ASR 仍返回旧模块中的 Pydantic
+            # 实例。字段完全相同但类身份不同，Pydantic v2 会逐条拒绝。
+            # 在报告契约边界统一降为普通字典，重新按当前 schema 校验。
+            transcript_segments=[_model_payload(item) for item in transcription.segments],
+            script_dialogues=[_model_payload(item) for item in script_dialogues],
+            ignored_script_lines=[
+                _model_payload(item) for item in parse_result.ignored_lines
+            ],
+            alignments=[_model_payload(item) for item in alignments],
             overall_similarity=overall_similarity,
             matched_count=counts[DialogueMatchStatus.matched],
             changed_count=counts[DialogueMatchStatus.changed],
             missing_count=counts[DialogueMatchStatus.missing],
             extra_count=counts[DialogueMatchStatus.extra],
-            quality=quality,
+            quality=_model_payload(quality),
             elapsed_ms=(time.perf_counter() - started) * 1000,
             created_at=created_at or datetime.now(timezone.utc),
         )
+
+
+def _model_payload(value: object) -> object:
+    """跨热更新模块边界传递稳定数据，不依赖 Pydantic 类对象身份。"""
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="python")
+    return value
 
 
 def _ranges(parts: list[str]) -> list[tuple[int, int]]:

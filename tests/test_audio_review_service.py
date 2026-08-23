@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import math
 
 import pytest
+from pydantic import BaseModel
 
 from schemas.multimodal import (
     AudioQualityMetrics,
@@ -193,6 +194,35 @@ class _FakeTranscriber:
         )
 
 
+class _StaleTranscriptSegment(BaseModel):
+    """模拟 Streamlit 热更新前由旧模块创建、但字段契约相同的对象。"""
+
+    id: str
+    start_ms: int
+    end_ms: int
+    text: str
+    confidence: float | None = None
+
+
+class _CachedOldTranscriber:
+    model_name = "cached-old-tiny"
+
+    def transcribe(self, _audio_path):
+        return TranscriptionResult(
+            segments=[
+                _StaleTranscriptSegment(
+                    id="old_asr_1",
+                    start_ms=200,
+                    end_ms=1200,
+                    text="账本在仓库",
+                    confidence=0.91,
+                )
+            ],
+            language="zh",
+            language_probability=0.98,
+        )
+
+
 def test_review_video_builds_report_with_hash_and_quality(monkeypatch, tmp_path):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"not-a-real-video")
@@ -223,6 +253,32 @@ def test_review_video_builds_report_with_hash_and_quality(monkeypatch, tmp_path)
     assert report.ignored_script_lines[0].label == "类型"
     assert len(report.content_hash) == 64
     assert len(report.script_hash) == 64
+
+
+def test_review_video_accepts_cached_segments_from_old_module(monkeypatch, tmp_path):
+    video_path = tmp_path / "cached-module.mp4"
+    video_path.write_bytes(b"not-a-real-video")
+    quality = AudioQualityMetrics(
+        duration_ms=1400,
+        sample_rate=16000,
+        channels=1,
+        rms_dbfs=-18,
+        peak_dbfs=-2,
+        clipping_ratio=0,
+        silence_ratio=0.1,
+    )
+    monkeypatch.setattr(audio_module, "extract_audio_track", lambda *_: quality)
+
+    report = AudioReviewService(_CachedOldTranscriber()).review_video(
+        video_path=video_path,
+        wav_path=tmp_path / "cached-module.wav",
+        script_text="林夏：账本在仓库。",
+        source_name="cached-module.mp4",
+    )
+
+    assert report.matched_count == 1
+    assert report.transcript_segments[0].text == "账本在仓库"
+    assert isinstance(report.transcript_segments[0], TranscriptSegment)
 
 
 def test_extract_audio_track_from_mp4_container(tmp_path):
