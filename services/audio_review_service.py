@@ -171,11 +171,28 @@ def parse_script_dialogues(script_text: str) -> ScriptDialogueParseResult:
     dialogues: list[ScriptDialogueLine] = []
     ignored_lines: list[IgnoredScriptLine] = []
     current_section = ""
+    pending_cue: tuple[int, str, str] | None = None
+
+    def ignore_pending(reason: str) -> None:
+        nonlocal pending_cue
+        if pending_cue is None:
+            return
+        cue_line, cue_text, cue_speaker = pending_cue
+        ignored_lines.append(
+            IgnoredScriptLine(
+                line_number=cue_line,
+                text=cue_text,
+                label=cue_speaker,
+                reason=reason,
+            )
+        )
+        pending_cue = None
 
     for line_number, raw in enumerate(lines, start=1):
         stripped = raw.strip()
         heading = _markdown_heading(stripped)
         if heading:
+            ignore_pending("说话人提示后遇到新章节，没有找到台词正文")
             level, title = heading
             if level <= 2:
                 current_section = title
@@ -185,12 +202,37 @@ def parse_script_dialogues(script_text: str) -> ScriptDialogueParseResult:
 
         is_quote = stripped.startswith(">")
         candidate = re.sub(r"^(?:[-*+]\s+|>\s*)", "", stripped).strip()
-        match = re.match(r"^([^：:]{1,40})[：:]\s*(.+)$", candidate)
-        if not match:
+        if _formatting_only(candidate):
+            ignore_pending("说话人提示后只有排版符号，没有可审核的台词正文")
             continue
 
+        match = re.match(r"^([^：:]{1,40})[：:]\s*(.*)$", candidate)
+        if not match:
+            if pending_cue is None:
+                continue
+            if is_quote or _standalone_stage_direction(candidate):
+                ignore_pending("说话人提示后只有动作或说明，没有可审核的台词正文")
+                continue
+            text = _clean_markdown(candidate)
+            if not normalize_dialogue(text):
+                ignore_pending("说话人提示后的内容只有符号，没有可审核的语音文本")
+                continue
+            _, _, speaker = pending_cue
+            dialogues.append(
+                ScriptDialogueLine(
+                    id=f"script_dialogue_{line_number}",
+                    line_number=line_number,
+                    speaker=speaker,
+                    text=text,
+                )
+            )
+            pending_cue = None
+            continue
+
+        ignore_pending("前一个说话人提示后直接出现了新的说话人，没有找到台词正文")
         raw_label = _clean_markdown(match.group(1))
-        text = match.group(2).strip()
+        raw_text = match.group(2).strip()
+        text = _clean_markdown(raw_text)
         speaker = re.sub(r"[（(][^）)]*[）)]", "", raw_label).strip()
         normalized_label = re.sub(r"\s+", "", speaker).lower()
 
@@ -215,6 +257,20 @@ def parse_script_dialogues(script_text: str) -> ScriptDialogueParseResult:
             )
             continue
 
+        if not normalize_dialogue(text):
+            if not raw_text or _markdown_closer_only(raw_text):
+                pending_cue = (line_number, stripped, speaker)
+            else:
+                ignored_lines.append(
+                    IgnoredScriptLine(
+                        line_number=line_number,
+                        text=stripped,
+                        label=speaker,
+                        reason="冒号后只有停顿或排版符号，不作为成片台词",
+                    )
+                )
+            continue
+
         dialogues.append(
             ScriptDialogueLine(
                 id=f"script_dialogue_{line_number}",
@@ -223,6 +279,8 @@ def parse_script_dialogues(script_text: str) -> ScriptDialogueParseResult:
                 text=text,
             )
         )
+
+    ignore_pending("说话人提示位于剧本结尾，没有找到台词正文")
 
     return ScriptDialogueParseResult(
         dialogues=dialogues,
@@ -274,6 +332,21 @@ def _markdown_heading(line: str) -> tuple[int, str] | None:
 
 def _clean_markdown(value: str) -> str:
     return re.sub(r"[*_`~]", "", value).strip()
+
+
+def _formatting_only(value: str) -> bool:
+    """Markdown 分隔符或强调符本身绝不能成为台词。"""
+    return bool(value) and not normalize_dialogue(_clean_markdown(value))
+
+
+def _markdown_closer_only(value: str) -> bool:
+    return bool(re.fullmatch(r"[*_`~\s]+", value))
+
+
+def _standalone_stage_direction(value: str) -> bool:
+    value = _clean_markdown(value).strip()
+    pairs = (("（", "）"), ("(", ")"), ("【", "】"), ("[", "]"))
+    return any(value.startswith(left) and value.endswith(right) for left, right in pairs)
 
 
 def _section_matches(section: str, options: set[str]) -> bool:
