@@ -119,12 +119,12 @@ class ScriptLintAgent:
         )
         result = ScriptAgentResult(
             run_id=run_id,
-            task=audited_task,
-            retrieved_rules=rules,
-            plan=plan,
-            tool_traces=traces,
-            audit=audit,
-            metrics=metrics,
+            task=_model_payload(audited_task),
+            retrieved_rules=[_model_payload(item) for item in rules],
+            plan=[_model_payload(item) for item in plan],
+            tool_traces=[_model_payload(item) for item in traces],
+            audit=_model_payload(audit),
+            metrics=_model_payload(metrics),
         )
         self._repo.insert_script_agent_result(result, created_at=now)
         return result
@@ -178,10 +178,10 @@ class ScriptLintAgent:
         self._complete(plan, "store_rule_candidate")
 
         return ScriptFeedbackResult(
-            feedback=feedback,
-            candidates=candidates,
-            plan=plan,
-            tool_traces=traces,
+            feedback=_model_payload(feedback),
+            candidates=[_model_payload(item) for item in candidates],
+            plan=[_model_payload(item) for item in plan],
+            tool_traces=[_model_payload(item) for item in traces],
         )
 
     def confirm_rule(self, rule_id: str) -> ScriptRule:
@@ -244,3 +244,13 @@ class ScriptLintAgent:
             )
         )
         return value
+
+
+def _model_payload(value: object) -> object:
+    """在 Agent 契约边界消除 Streamlit 热更新造成的模型类身份差异。"""
+    if isinstance(value, dict):
+        return value
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="python")
+    return value

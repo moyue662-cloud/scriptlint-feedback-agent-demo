@@ -104,6 +104,23 @@ class ScriptDialogueParseResult(BaseModel):
     discovered_characters: list[str] = Field(default_factory=list)
 
 
+class SubtitleObservation(BaseModel):
+    """从成片画面硬字幕提取的一条带时间码文字证据。"""
+
+    id: str
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    frame_number: int = Field(ge=0)
+    text: str
+    confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _valid_subtitle_range(self) -> "SubtitleObservation":
+        if self.start_ms > self.end_ms:
+            raise ValueError("start_ms 不能大于 end_ms")
+        return self
+
+
 class DialogueMatchStatus(str, Enum):
     matched = "matched"
     changed = "changed"
@@ -118,9 +135,14 @@ class DialogueAlignment(BaseModel):
     speaker: str | None = None
     expected_text: str | None = None
     recognized_text: str | None = None
+    subtitle_text: str | None = None
     start_ms: int | None = Field(default=None, ge=0)
     end_ms: int | None = Field(default=None, ge=0)
     similarity: float = Field(default=0, ge=0, le=1)
+    subtitle_start_ms: int | None = Field(default=None, ge=0)
+    subtitle_end_ms: int | None = Field(default=None, ge=0)
+    subtitle_similarity: float | None = Field(default=None, ge=0, le=1)
+    resolved_by_subtitle: bool = False
     reason: str
     suggestion: str
 
@@ -148,6 +170,11 @@ class AudioReviewReport(BaseModel):
     transcript_segments: list[TranscriptSegment]
     script_dialogues: list[ScriptDialogueLine]
     ignored_script_lines: list[IgnoredScriptLine] = Field(default_factory=list)
+    subtitle_observations: list[SubtitleObservation] = Field(default_factory=list)
+    ocr_model_name: str | None = None
+    ocr_frame_count: int = Field(default=0, ge=0)
+    ocr_rescued_count: int = Field(default=0, ge=0)
+    ocr_warnings: list[str] = Field(default_factory=list)
     alignments: list[DialogueAlignment]
     overall_similarity: float = Field(ge=0, le=1)
     matched_count: int = Field(ge=0)

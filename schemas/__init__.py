@@ -74,6 +74,7 @@ from .multimodal import (
     ReviewObservation,
     ScriptDialogueLine,
     ScriptDialogueParseResult,
+    SubtitleObservation,
     TranscriptSegment,
 )
 from .evaluation import (
@@ -127,6 +128,7 @@ __all__ = [
     "ScriptDialogueLine",
     "IgnoredScriptLine",
     "ScriptDialogueParseResult",
+    "SubtitleObservation",
     "DialogueMatchStatus",
     "DialogueAlignment",
     "AudioQualityMetrics",

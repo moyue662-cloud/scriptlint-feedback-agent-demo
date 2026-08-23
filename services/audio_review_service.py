@@ -26,6 +26,7 @@ from schemas.multimodal import (
     IgnoredScriptLine,
     ScriptDialogueParseResult,
     ScriptDialogueLine,
+    SubtitleObservation,
     TranscriptSegment,
 )
 
@@ -33,6 +34,8 @@ from schemas.multimodal import (
 MAX_VIDEO_BYTES = 200 * 1024 * 1024
 MAX_AUDIO_DURATION_SECONDS = 12 * 60
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+OCR_SAMPLE_INTERVAL_MS = 1500
+MAX_OCR_FRAMES = 240
 
 _NON_DIALOGUE_SECTIONS = {
     "作品信息",
@@ -120,6 +123,12 @@ class SpeechTranscriber(Protocol):
     def transcribe(self, audio_path: str | Path) -> TranscriptionResult: ...
 
 
+class SubtitleReader(Protocol):
+    model_name: str
+
+    def recognize(self, image: np.ndarray) -> list[tuple[str, float]]: ...
+
+
 class FasterWhisperTranscriber:
     """延迟加载 faster-whisper；模型只在第一次真正审片时下载。"""
 
@@ -162,6 +171,37 @@ class FasterWhisperTranscriber:
             language=getattr(info, "language", None),
             language_probability=getattr(info, "language_probability", None),
         )
+
+
+class RapidOcrSubtitleReader:
+    """轻量中文硬字幕 OCR；模型在第一次启用字幕增强时加载。"""
+
+    model_name = "RapidOCR PP-OCRv6 small"
+
+    def __init__(self, text_score: float = 0.5) -> None:
+        try:
+            from rapidocr import RapidOCR
+        except ImportError as exc:  # pragma: no cover - 由部署依赖决定
+            raise AudioReviewError(
+                "字幕 OCR 组件未安装，请安装 requirements.txt 后重启应用。"
+            ) from exc
+        self._engine = RapidOCR()
+        self._text_score = text_score
+
+    def recognize(self, image: np.ndarray) -> list[tuple[str, float]]:
+        try:
+            result = self._engine(image, text_score=self._text_score)
+        except Exception as exc:  # pragma: no cover - 模型运行时错误
+            raise AudioReviewError(f"字幕 OCR 识别失败：{exc}") from exc
+        texts = getattr(result, "txts", None)
+        scores = getattr(result, "scores", None)
+        if texts is None or scores is None:
+            return []
+        return [
+            (str(text).strip(), float(score))
+            for text, score in zip(texts, scores)
+            if str(text).strip()
+        ]
 
 
 def parse_script_dialogues(script_text: str) -> ScriptDialogueParseResult:
@@ -391,6 +431,206 @@ def normalize_dialogue(text: str) -> str:
     return "".join(re.findall(r"[\u3400-\u9fffA-Za-z0-9]", text)).lower()
 
 
+def extract_subtitle_observations(
+    video_path: str | Path,
+    reader: SubtitleReader,
+    *,
+    sample_interval_ms: int = OCR_SAMPLE_INTERVAL_MS,
+    max_frames: int = MAX_OCR_FRAMES,
+    target_timestamps_ms: list[int] | None = None,
+) -> tuple[list[SubtitleObservation], int]:
+    """顺序解码视频并抽取下半屏硬字幕，返回去重后的时间码文字证据。"""
+    try:
+        import av
+    except ImportError as exc:  # pragma: no cover - 由部署依赖决定
+        raise AudioReviewError("视频解码组件未安装，无法提取画面字幕。") from exc
+
+    video_path = Path(video_path)
+    observations: list[SubtitleObservation] = []
+    latest_by_text: dict[str, int] = {}
+    sampled_frames = 0
+    try:
+        with av.open(str(video_path)) as container:
+            if not container.streams.video:
+                raise AudioReviewError("视频中没有检测到画面轨，无法提取字幕。")
+            stream = container.streams.video[0]
+            duration_ms = round(container.duration / 1000) if container.duration else 0
+            adaptive_interval = max(
+                sample_interval_ms,
+                math.ceil(duration_ms / max_frames) if duration_ms else sample_interval_ms,
+            )
+            targets = _prepare_ocr_targets(target_timestamps_ms or [], max_frames)
+            target_index = 0
+            next_sample_ms = 0
+            decoded_frame_number = 0
+            for frame in container.decode(stream):
+                decoded_frame_number += 1
+                if frame.pts is None or frame.time_base is None:
+                    continue
+                timestamp_ms = max(0, round(float(frame.pts * frame.time_base) * 1000))
+                if targets:
+                    if target_index >= len(targets):
+                        break
+                    if timestamp_ms < targets[target_index]:
+                        continue
+                    target_index += 1
+                elif timestamp_ms < next_sample_ms:
+                    continue
+                image = frame.to_ndarray(format="bgr24")
+                if image.size == 0:
+                    continue
+                crop_top = max(0, int(image.shape[0] * 0.48))
+                subtitle_region = image[crop_top:, :, :]
+                recognized = reader.recognize(subtitle_region)
+                sampled_frames += 1
+                next_sample_ms = timestamp_ms + adaptive_interval
+
+                candidates = recognized[:8]
+                if len(candidates) > 1:
+                    combined = "".join(text for text, _ in candidates)
+                    combined_score = sum(score for _, score in candidates) / len(candidates)
+                    candidates = [*candidates, (combined, combined_score)]
+                for text, score in candidates:
+                    normalized = normalize_dialogue(text)
+                    if len(normalized) < 2 or not 0 <= score <= 1:
+                        continue
+                    previous_index = latest_by_text.get(normalized)
+                    if previous_index is not None:
+                        previous = observations[previous_index]
+                        if timestamp_ms - previous.end_ms <= adaptive_interval * 1.5:
+                            observations[previous_index] = previous.model_copy(
+                                update={
+                                    "end_ms": timestamp_ms + adaptive_interval,
+                                    "confidence": max(previous.confidence, score),
+                                }
+                            )
+                            continue
+                    observations.append(
+                        SubtitleObservation(
+                            id=f"subtitle_{len(observations) + 1:04d}",
+                            start_ms=timestamp_ms,
+                            end_ms=timestamp_ms + adaptive_interval,
+                            frame_number=decoded_frame_number,
+                            text=text,
+                            confidence=score,
+                        )
+                    )
+                    latest_by_text[normalized] = len(observations) - 1
+                if sampled_frames >= max_frames:
+                    break
+    except AudioReviewError:
+        raise
+    except Exception as exc:
+        raise AudioReviewError(f"无法提取视频字幕：{exc}") from exc
+    return observations, sampled_frames
+
+
+def _prepare_ocr_targets(values: list[int], max_frames: int) -> list[int]:
+    targets: list[int] = []
+    for value in sorted({max(0, int(item)) for item in values}):
+        if not targets or value - targets[-1] >= 450:
+            targets.append(value)
+    if len(targets) <= max_frames:
+        return targets
+    step = len(targets) / max_frames
+    return [targets[min(len(targets) - 1, math.floor(index * step))] for index in range(max_frames)]
+
+
+def fuse_subtitle_evidence(
+    alignments: list[DialogueAlignment],
+    observations: list[SubtitleObservation],
+) -> tuple[list[DialogueAlignment], int]:
+    """用独立字幕证据消除 ASR 同音字误报，但不掩盖真正的无声/漏录。"""
+    if not observations:
+        return alignments, 0
+    fused: list[DialogueAlignment] = []
+    used_observations: set[str] = set()
+    rescued_count = 0
+    for alignment in alignments:
+        if not alignment.expected_text or alignment.status == DialogueMatchStatus.extra:
+            fused.append(alignment)
+            continue
+        candidates = _subtitle_candidates(alignment, observations)
+        scored = [
+            (_text_similarity(alignment.expected_text, item.text), item)
+            for item in candidates
+            if item.id not in used_observations
+        ]
+        if not scored:
+            fused.append(alignment)
+            continue
+        subtitle_similarity, subtitle = max(scored, key=lambda pair: pair[0])
+        if subtitle_similarity < 0.35:
+            fused.append(alignment)
+            continue
+
+        updates: dict[str, object] = {
+            "subtitle_text": subtitle.text,
+            "subtitle_start_ms": subtitle.start_ms,
+            "subtitle_end_ms": subtitle.end_ms,
+            "subtitle_similarity": subtitle_similarity,
+        }
+        if (
+            alignment.status == DialogueMatchStatus.changed
+            and subtitle_similarity >= 0.78
+        ):
+            updates.update(
+                {
+                    "status": DialogueMatchStatus.matched,
+                    "resolved_by_subtitle": True,
+                    "reason": "画面字幕与剧本高度一致；音频差异更可能是同音字或 ASR 误识别",
+                    "suggestion": "已由字幕交叉确认；仍建议抽听时间码，确认成片发音清晰",
+                }
+            )
+            rescued_count += 1
+            used_observations.add(subtitle.id)
+        elif (
+            alignment.status == DialogueMatchStatus.missing
+            and subtitle_similarity >= 0.78
+        ):
+            updates.update(
+                {
+                    "reason": "画面字幕与剧本一致，但音频中未稳定识别到该句；字幕不能证明实际收音完整",
+                    "suggestion": "回听字幕对应时间码，区分漏录、音量过低与 ASR 未识别",
+                }
+            )
+        elif alignment.status == DialogueMatchStatus.changed:
+            updates.update(
+                {
+                    "reason": "音频与画面字幕都未能充分确认剧本原句，仍需人工复核",
+                    "suggestion": "同时回看字幕时间码和音频时间码，确认是现场改词、字幕错误还是识别误差",
+                }
+            )
+        fused.append(alignment.model_copy(update=updates))
+    return fused, rescued_count
+
+
+def _subtitle_candidates(
+    alignment: DialogueAlignment,
+    observations: list[SubtitleObservation],
+) -> list[SubtitleObservation]:
+    if alignment.start_ms is None:
+        return observations
+    end_ms = alignment.end_ms if alignment.end_ms is not None else alignment.start_ms
+    nearby = [
+        item
+        for item in observations
+        if item.end_ms >= alignment.start_ms - 2500 and item.start_ms <= end_ms + 2500
+    ]
+    return nearby or observations
+
+
+def _text_similarity(expected: str, actual: str) -> float:
+    left = normalize_dialogue(expected)
+    right = normalize_dialogue(actual)
+    if not left or not right:
+        return 0.0
+    ratio = SequenceMatcher(None, left, right, autojunk=False).ratio()
+    if left in right or right in left:
+        ratio = max(ratio, min(len(left), len(right)) / max(len(left), len(right)))
+    return min(1.0, ratio)
+
+
 def align_dialogues(
     script_dialogues: list[ScriptDialogueLine],
     transcript_segments: list[TranscriptSegment],
@@ -539,8 +779,13 @@ def extract_audio_track(video_path: str | Path, wav_path: str | Path) -> AudioQu
 
 
 class AudioReviewService:
-    def __init__(self, transcriber: SpeechTranscriber) -> None:
+    def __init__(
+        self,
+        transcriber: SpeechTranscriber,
+        subtitle_reader: SubtitleReader | None = None,
+    ) -> None:
         self._transcriber = transcriber
+        self._subtitle_reader = subtitle_reader
 
     def review_video(
         self,
@@ -559,6 +804,25 @@ class AudioReviewService:
         alignments, overall_similarity = align_dialogues(
             script_dialogues, transcription.segments
         )
+        subtitle_observations: list[SubtitleObservation] = []
+        ocr_frame_count = 0
+        ocr_rescued_count = 0
+        ocr_warnings: list[str] = []
+        if self._subtitle_reader is not None:
+            try:
+                subtitle_observations, ocr_frame_count = extract_subtitle_observations(
+                    video_path,
+                    self._subtitle_reader,
+                    target_timestamps_ms=[
+                        (item.start_ms + item.end_ms) // 2
+                        for item in transcription.segments
+                    ],
+                )
+                alignments, ocr_rescued_count = fuse_subtitle_evidence(
+                    alignments, subtitle_observations
+                )
+            except AudioReviewError as exc:
+                ocr_warnings.append(str(exc))
         counts = {
             status: sum(item.status == status for item in alignments)
             for status in DialogueMatchStatus
@@ -579,6 +843,17 @@ class AudioReviewService:
             ignored_script_lines=[
                 _model_payload(item) for item in parse_result.ignored_lines
             ],
+            subtitle_observations=[
+                _model_payload(item) for item in subtitle_observations
+            ],
+            ocr_model_name=(
+                self._subtitle_reader.model_name
+                if self._subtitle_reader is not None
+                else None
+            ),
+            ocr_frame_count=ocr_frame_count,
+            ocr_rescued_count=ocr_rescued_count,
+            ocr_warnings=ocr_warnings,
             alignments=[_model_payload(item) for item in alignments],
             overall_similarity=overall_similarity,
             matched_count=counts[DialogueMatchStatus.matched],

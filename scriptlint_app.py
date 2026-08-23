@@ -37,6 +37,7 @@ from services.audio_review_service import (
     AudioReviewService,
     FasterWhisperTranscriber,
     MAX_VIDEO_BYTES,
+    RapidOcrSubtitleReader,
     parse_script_dialogues,
 )
 
@@ -132,15 +133,38 @@ def _save_version(repo: SQLiteRepository, *, source_kind: ScriptSourceKind, sour
 
 
 @st.cache_resource(show_spinner=False)
-def _runtime(db_path: str):
+def _runtime(db_path: str, schema_epoch: str):
     repo = SQLiteRepository(db_path)
     repo.init()
     return repo, ScriptLintAgent(repo)
 
 
 @st.cache_resource(show_spinner=False)
-def _asr_transcriber(model_name: str) -> FasterWhisperTranscriber:
+def _asr_transcriber(
+    model_name: str, schema_epoch: str
+) -> FasterWhisperTranscriber:
     return FasterWhisperTranscriber(model_name)
+
+
+@st.cache_resource(show_spinner=False)
+def _subtitle_reader(schema_epoch: str) -> RapidOcrSubtitleReader:
+    return RapidOcrSubtitleReader()
+
+
+def _runtime_schema_epoch() -> str:
+    """类被热更新后自动换缓存，防止新旧 Pydantic 对象混用。"""
+    return ":".join(
+        str(id(item))
+        for item in (
+            SQLiteRepository,
+            ScriptLintAgent,
+            ScriptAuditTask,
+            ScriptAgentResult,
+            AudioReviewReport,
+            FasterWhisperTranscriber,
+            RapidOcrSubtitleReader,
+        )
+    )
 
 
 def _inject_css() -> None:
@@ -325,7 +349,11 @@ def _new_task() -> ScriptAuditTask:
 
 
 def _run(agent: ScriptLintAgent, task: ScriptAuditTask) -> ScriptAgentResult:
-    return agent.analyze(task=task, run_id=f"run_{uuid.uuid4().hex[:10]}", now=_now())
+    result = agent.analyze(
+        task=task, run_id=f"run_{uuid.uuid4().hex[:10]}", now=_now()
+    )
+    # 即使外部仍传回旧模块实例，UI 也只接收当前 schema 的对象。
+    return ScriptAgentResult.model_validate(result.model_dump(mode="python"))
 
 
 def _render_input(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
@@ -637,16 +665,18 @@ def _render_dialogue_preview(script_text: str) -> None:
 
 
 def _render_audio_report(report: AudioReviewReport) -> None:
-    st.markdown("<div class='section-label'>音轨—剧本审计结果</div>", unsafe_allow_html=True)
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("整体台词相似度", f"{report.overall_similarity:.0%}")
+    st.markdown("<div class='section-label'>音频 + 字幕—剧本审计结果</div>", unsafe_allow_html=True)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1.metric("ASR 原始相似度", f"{report.overall_similarity:.0%}")
     c2.metric("基本一致", report.matched_count)
     c3.metric("疑似改词", report.changed_count)
     c4.metric("疑似漏词", report.missing_count)
     c5.metric("疑似加词", report.extra_count)
+    c6.metric("字幕消歧", report.ocr_rescued_count)
     st.caption(
         f"ASR 模型：{report.model_name} · 识别语言：{report.detected_language or '未知'} · "
-        f"音轨时长：{report.quality.duration_ms / 1000:.1f}s · 总耗时：{report.elapsed_ms / 1000:.1f}s"
+        f"音轨时长：{report.quality.duration_ms / 1000:.1f}s · 总耗时：{report.elapsed_ms / 1000:.1f}s · "
+        f"字幕 OCR：{report.ocr_model_name or '未启用'}"
     )
 
     if report.quality.warnings:
@@ -654,6 +684,43 @@ def _render_audio_report(report: AudioReviewReport) -> None:
             st.warning(f"音质提示：{warning}")
     else:
         st.success("音轨基础质量未触发低音量、削波或高静音比例提示。")
+
+    for warning in report.ocr_warnings:
+        st.warning(f"字幕 OCR 提示：{warning}；本轮已保留纯音频审片结果。")
+    if report.ocr_model_name and not report.ocr_warnings:
+        if report.subtitle_observations:
+            st.info(
+                f"字幕 OCR 抽检 {report.ocr_frame_count} 帧，得到 "
+                f"{len(report.subtitle_observations)} 条去重文字证据。"
+            )
+        else:
+            st.info("已启用字幕 OCR，但抽检画面中没有发现可用硬字幕。")
+
+    rescued = [item for item in report.alignments if item.resolved_by_subtitle]
+    if rescued:
+        st.success(
+            f"画面字幕交叉确认了 {len(rescued)} 条剧本台词，已避免把 ASR 同音字误识别当作现场改词。"
+        )
+        with st.expander("查看被字幕纠正的 ASR 同音字结果"):
+            st.dataframe(
+                [
+                    {
+                        "剧本行": item.script_line_number,
+                        "角色": item.speaker or "—",
+                        "剧本": item.expected_text,
+                        "ASR": item.recognized_text or "—",
+                        "画面字幕": item.subtitle_text or "—",
+                        "字幕相似度": (
+                            "—"
+                            if item.subtitle_similarity is None
+                            else f"{item.subtitle_similarity:.0%}"
+                        ),
+                    }
+                    for item in rescued
+                ],
+                hide_index=True,
+                **_stretch(st.dataframe),
+            )
 
     issues = [
         item for item in report.alignments if item.status != DialogueMatchStatus.matched
@@ -670,6 +737,15 @@ def _render_audio_report(report: AudioReviewReport) -> None:
             time_range = f"{_timestamp(item.start_ms)}–{_timestamp(item.end_ms)}"
             expected = html.escape(item.expected_text or "—")
             recognized = html.escape(item.recognized_text or "—")
+            subtitle_evidence = ""
+            if item.subtitle_text:
+                subtitle_time = (
+                    f"{_timestamp(item.subtitle_start_ms)}–{_timestamp(item.subtitle_end_ms)}"
+                )
+                subtitle_evidence = (
+                    "<div class='trace-quote'><b>画面字幕 OCR · "
+                    f"{subtitle_time}</b><br>“{html.escape(item.subtitle_text)}”</div>"
+                )
             speaker_suffix = f" · {html.escape(item.speaker)}" if item.speaker else ""
             st.markdown(
                 "<div class='finding'>"
@@ -677,6 +753,7 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                 f"<div class='panel-note'>{html.escape(item.reason)}</div>"
                 f"<div class='source-quote'><b>剧本 · 第{item.script_line_number or '—'}行{speaker_suffix}</b><br>“{expected}”</div>"
                 f"<div class='trace-quote'><b>ASR 音频证据</b><br>“{recognized}”</div>"
+                f"{subtitle_evidence}"
                 f"<div class='panel-note' style='margin-top:10px'><b>建议：</b>{html.escape(item.suggestion)}</div>"
                 "</div>",
                 unsafe_allow_html=True,
@@ -698,6 +775,21 @@ def _render_audio_report(report: AudioReviewReport) -> None:
         )
     with st.expander("查看音轨质量指标"):
         st.json(report.quality.model_dump(mode="json"))
+    if report.subtitle_observations:
+        with st.expander(f"查看画面字幕 OCR 时间线（{len(report.subtitle_observations)} 条）"):
+            st.dataframe(
+                [
+                    {
+                        "开始": _timestamp(item.start_ms),
+                        "结束": _timestamp(item.end_ms),
+                        "字幕文字": item.text,
+                        "置信度": f"{item.confidence:.0%}",
+                    }
+                    for item in report.subtitle_observations
+                ],
+                hide_index=True,
+                **_stretch(st.dataframe),
+            )
     if report.ignored_script_lines:
         with st.expander(f"本轮未参与音频对齐的说明/元数据（{len(report.ignored_script_lines)} 行）"):
             st.dataframe(
@@ -719,16 +811,16 @@ def _render_audio_report(report: AudioReviewReport) -> None:
         mime="application/json",
     )
     st.info(
-        "重要边界：这一版只能确认‘声音中识别到了什么’，不能仅凭音轨判断是谁说的，"
-        "也不能判断动作、表情、服装和道具。所有异常必须由编导回看时间码确认。"
+        "重要边界：字幕 OCR 只能读取画面中的硬字幕，不等于理解人物动作或确认实际发音；"
+        "仅凭音频仍不能可靠判断是谁说的，也不能判断表情、服装和道具。所有异常必须由编导回看时间码确认。"
     )
 
 
 def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
     st.markdown(
         '<div class="panel"><div class="panel-title">视频音频审片</div>'
-        '<div class="panel-note">上传成片 → 提取 16kHz 单声道音轨 → 中文 ASR → '
-        '按时间码与“角色：台词”逐行对齐。第一次运行会下载语音模型，耗时会更长。</div>',
+        '<div class="panel-note">上传成片 → 提取音轨做中文 ASR → 抽取下半屏硬字幕 → '
+        '与剧本“角色：台词”三方比对。字幕可辅助消除同音字误报；第一次运行会下载模型。</div>',
         unsafe_allow_html=True,
     )
     c1, c2 = st.columns([1.35, 1])
@@ -760,6 +852,11 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         ["tiny", "base"],
         format_func=lambda value: "tiny｜最快，适合流程演示" if value == "tiny" else "base｜中文更稳，首次下载与识别更慢",
     )
+    use_subtitle_ocr = st.checkbox(
+        "启用画面字幕 OCR 交叉确认",
+        value=True,
+        help="抽取视频下半屏硬字幕，与 ASR 和剧本三方比对；能降低同音字误报，但会增加处理时间。",
+    )
     run_audio = st.button(
         "提取音轨并对照剧本审核",
         type="primary",
@@ -782,12 +879,19 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         else:
             suffix = Path(video.name).suffix.lower()
             try:
-                with st.spinner("正在加载语音模型、提取音轨并生成时间码转写…"):
+                with st.spinner("正在提取音轨、识别语音并抽取画面字幕…"):
                     with tempfile.TemporaryDirectory(prefix="scriptlint_audio_") as temp_dir:
                         video_path = Path(temp_dir) / f"source{suffix}"
                         wav_path = Path(temp_dir) / "audio.wav"
                         video_path.write_bytes(video.getvalue())
-                        service = AudioReviewService(_asr_transcriber(model_name))
+                        service = AudioReviewService(
+                            _asr_transcriber(model_name, _runtime_schema_epoch()),
+                            subtitle_reader=(
+                                _subtitle_reader(_runtime_schema_epoch())
+                                if use_subtitle_ocr
+                                else None
+                            ),
+                        )
                         report = service.review_video(
                             video_path=video_path,
                             wav_path=wav_path,
@@ -1025,12 +1129,12 @@ def _validation(repo: SQLiteRepository) -> None:
 def _about() -> None:
     st.markdown('<div class="panel"><div class="panel-title">现在能做什么，未来怎样进入视频审片？</div>'
                 '<div class="panel-note" style="font-size:14px;max-width:850px;margin-top:12px">'
-                '现在：上传短剧成片 → 提取音轨并生成时间码 ASR → 与剧本台词对齐；同时提取人物事实、'
+                '现在：上传短剧成片 → 提取音轨生成时间码 ASR + 抽取画面硬字幕 → 与剧本台词三方对齐；同时提取人物事实、'
                 '检查局部连续性、接收编导纠正并在后续版本复用。音频问题可回到时间码，规则问题可回到反馈原话。</div><hr>'
                 '<div class="section-label">产品边界</div>'
-                '<div class="panel-note" style="font-size:13px">当前 Demo 已实现视频上传、音轨解码、中文 ASR 与剧本台词对齐；'
-                '音频无法可靠确认说话人身份，也不能判断画面里的动作、表情、服装和道具。上述视觉能力仍需镜头切分、角色跟踪与视觉模型，'
-                '因此当前产品准确表述为“视频音频审片 MVP”，而不是完整多模态审片。</div></div>',
+                '<div class="panel-note" style="font-size:13px">当前 Demo 已实现视频上传、音轨解码、中文 ASR、硬字幕 OCR 与剧本台词对齐；'
+                'OCR 只读取画面文字，仍不能判断人物动作、表情、服装和道具。上述视觉能力仍需镜头切分、角色跟踪与视觉模型，'
+                '因此当前产品准确表述为“音频 + 字幕审片 MVP”，而不是完整视觉审片。</div></div>',
                 unsafe_allow_html=True)
 
 
@@ -1045,7 +1149,7 @@ def main() -> None:
     st.session_state.setdefault("version_label", "V1")
     st.session_state.setdefault("demo_stage", 1)
     db_path = os.getenv("DP_DB_PATH", str(Path(PROJECT_ROOT) / "scriptlint_demo.db"))
-    repo, agent = _runtime(db_path)
+    repo, agent = _runtime(db_path, _runtime_schema_epoch())
     _sidebar(repo)
     _header()
     nav = st.radio("导航", ["视频音频审片", "剧本审计", "项目规则", "固定评测", "用户验证", "演进路线"], horizontal=True, label_visibility="collapsed")

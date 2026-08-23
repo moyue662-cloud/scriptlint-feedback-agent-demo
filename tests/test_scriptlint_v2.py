@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from pydantic import Field, create_model
+
 from repositories import SQLiteRepository
 from schemas import (
     FindingType,
@@ -100,6 +102,40 @@ def test_confirmed_user_rules_are_reused_on_later_version():
     result = agent.analyze(task=_task(), run_id="run_later_version", now=NOW)
     assert result.metrics.memory_applied_count == 2
     assert len([item for item in result.audit.findings if item.rule_ids]) == 2
+    repo.close()
+
+
+def test_agent_accepts_same_task_contract_from_pre_reload_module():
+    stale_task_type = create_model(
+        "ScriptAuditTask",
+        id=(str, ...),
+        team_id=(str, ...),
+        project_id=(str, ...),
+        episode=(int, ...),
+        title=(str, ...),
+        script_text=(str, ...),
+        version_id=(str | None, None),
+        facts=(list[object], Field(default_factory=list)),
+    )
+    stale_task = stale_task_type(
+        id="task_before_reload",
+        team_id="team_v2",
+        project_id="project_v2",
+        episode=3,
+        title="热更新前任务",
+        script_text="女主：账本就在城南仓库。",
+    )
+    repo = SQLiteRepository(":memory:")
+    repo.init()
+
+    result = ScriptLintAgent(repo).analyze(
+        task=stale_task,
+        run_id="run_after_reload",
+        now=NOW,
+    )
+
+    assert isinstance(result.task, ScriptAuditTask)
+    assert result.task.id == "task_before_reload"
     repo.close()
 
 

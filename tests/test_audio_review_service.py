@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from fractions import Fraction
 import math
 
 import pytest
@@ -8,7 +9,9 @@ from pydantic import BaseModel
 
 from schemas.multimodal import (
     AudioQualityMetrics,
+    DialogueAlignment,
     DialogueMatchStatus,
+    SubtitleObservation,
     TranscriptSegment,
 )
 from services import audio_review_service as audio_module
@@ -19,6 +22,8 @@ from services.audio_review_service import (
     align_dialogues,
     extract_audio_track,
     extract_script_dialogues,
+    extract_subtitle_observations,
+    fuse_subtitle_evidence,
     normalize_dialogue,
     parse_script_dialogues,
 )
@@ -181,6 +186,103 @@ def test_alignment_reports_changed_missing_and_extra_speech():
 def test_alignment_requires_character_dialogue_format():
     with pytest.raises(AudioReviewError, match="角色：台词"):
         align_dialogues([], [_segment(1, "你好", 0, 500)])
+
+
+def test_subtitle_can_resolve_asr_homophone_change():
+    alignment = DialogueAlignment(
+        id="alignment_homophone",
+        status=DialogueMatchStatus.changed,
+        script_line_number=80,
+        speaker="旁白",
+        expected_text="澄思智能的商务车迷路，停在了哲学楼门口。",
+        recognized_text="城司智能的商务车迷路停在了折皿龙门口",
+        start_ms=0,
+        end_ms=3520,
+        similarity=0.68,
+        reason="音频部分匹配",
+        suggestion="复核",
+    )
+    subtitle = SubtitleObservation(
+        id="subtitle_1",
+        start_ms=0,
+        end_ms=3500,
+        frame_number=1,
+        text="澄思智能的商务车迷路，停在了哲学楼门口。",
+        confidence=0.96,
+    )
+
+    fused, rescued = fuse_subtitle_evidence([alignment], [subtitle])
+
+    assert rescued == 1
+    assert fused[0].status == DialogueMatchStatus.matched
+    assert fused[0].resolved_by_subtitle is True
+    assert fused[0].subtitle_text == subtitle.text
+
+
+def test_subtitle_does_not_hide_missing_audio():
+    alignment = DialogueAlignment(
+        id="alignment_missing_audio",
+        status=DialogueMatchStatus.missing,
+        script_line_number=617,
+        speaker="赵启明",
+        expected_text="他才来几周？",
+        similarity=0.1,
+        reason="音频未找到",
+        suggestion="复核",
+    )
+    subtitle = SubtitleObservation(
+        id="subtitle_2",
+        start_ms=235000,
+        end_ms=237000,
+        frame_number=100,
+        text="他才来几周？",
+        confidence=0.93,
+    )
+
+    fused, rescued = fuse_subtitle_evidence([alignment], [subtitle])
+
+    assert rescued == 0
+    assert fused[0].status == DialogueMatchStatus.missing
+    assert "字幕不能证明实际收音完整" in fused[0].reason
+
+
+class _FakeSubtitleReader:
+    model_name = "fake-ocr"
+
+    def recognize(self, _image):
+        return [("项目暂停", 0.95)]
+
+
+def test_extract_subtitle_observations_samples_and_deduplicates_video(tmp_path):
+    av = pytest.importorskip("av")
+    np = pytest.importorskip("numpy")
+    video_path = tmp_path / "subtitle.mp4"
+    with av.open(str(video_path), mode="w") as container:
+        stream = container.add_stream("mpeg4", rate=2)
+        stream.width = 320
+        stream.height = 180
+        stream.pix_fmt = "yuv420p"
+        for index in range(4):
+            image = np.zeros((180, 320, 3), dtype=np.uint8)
+            frame = av.VideoFrame.from_ndarray(image, format="bgr24")
+            frame.pts = index
+            frame.time_base = Fraction(1, 2)
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode(None):
+            container.mux(packet)
+
+    observations, frame_count = extract_subtitle_observations(
+        video_path,
+        _FakeSubtitleReader(),
+        sample_interval_ms=400,
+        max_frames=10,
+    )
+
+    assert frame_count >= 2
+    assert len(observations) == 1
+    assert observations[0].text == "项目暂停"
+    assert observations[0].end_ms > observations[0].start_ms
 
 
 class _FakeTranscriber:
