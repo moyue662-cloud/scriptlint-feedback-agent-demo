@@ -39,6 +39,7 @@ from services.audio_review_service import (
     MAX_VIDEO_BYTES,
     RapidOcrSubtitleReader,
     parse_script_dialogues,
+    to_simplified_chinese,
 )
 
 
@@ -687,18 +688,25 @@ def _render_dialogue_preview(script_text: str) -> None:
 
 def _render_audio_report(report: AudioReviewReport) -> None:
     st.markdown("<div class='section-label'>音频 + 字幕—剧本审计结果</div>", unsafe_allow_html=True)
+    rescued = [
+        item
+        for item in report.alignments
+        if getattr(item, "resolved_by_audio", False)
+        or getattr(item, "resolved_by_subtitle", False)
+    ]
     c1, c2, c3, c4, c5, c6 = st.columns(6)
-    c1.metric("ASR 原始相似度", f"{report.overall_similarity:.0%}")
+    c1.metric("字符原始相似度", f"{report.overall_similarity:.0%}")
     c2.metric("基本一致", report.matched_count)
     c3.metric("疑似改词", report.changed_count)
     c4.metric("疑似漏词", report.missing_count)
     c5.metric("疑似加词", report.extra_count)
-    c6.metric("字幕消歧", report.ocr_rescued_count)
+    c6.metric("证据消歧", len(rescued))
     st.caption(
         f"ASR 模型：{report.model_name} · 识别语言：{report.detected_language or '未知'} · "
         f"音轨时长：{report.quality.duration_ms / 1000:.1f}s · 总耗时：{report.elapsed_ms / 1000:.1f}s · "
         f"字幕 OCR：{report.ocr_model_name or '未启用'}"
     )
+    st.caption("字符原始相似度仅用于诊断；最终结论还会综合简体字面、带声调读音、轻量语义和字幕证据。")
 
     if report.quality.warnings:
         for warning in report.quality.warnings:
@@ -717,20 +725,26 @@ def _render_audio_report(report: AudioReviewReport) -> None:
         else:
             st.info("已启用字幕 OCR，但抽检画面中没有发现可用硬字幕。")
 
-    rescued = [item for item in report.alignments if item.resolved_by_subtitle]
     if rescued:
         st.success(
-            f"画面字幕交叉确认了 {len(rescued)} 条剧本台词，已避免把 ASR 同音字误识别当作现场改词。"
+            f"音频读音、轻量语义或画面字幕交叉确认了 {len(rescued)} 条台词，"
+            "已避免把繁简体和同音字误识别当作现场改词。"
         )
-        with st.expander("查看被字幕纠正的 ASR 同音字结果"):
+        with st.expander("查看被多路证据判定为一致的结果"):
             st.dataframe(
                 [
                     {
                         "剧本行": item.script_line_number,
                         "角色": item.speaker or "—",
                         "剧本": item.expected_text,
-                        "ASR": item.recognized_text or "—",
+                        "ASR（简体）": to_simplified_chinese(item.recognized_text or "—"),
                         "画面字幕": item.subtitle_text or "—",
+                        "判定依据": getattr(item, "evidence_match_basis", None) or "—",
+                        "读音相似度": (
+                            "—"
+                            if getattr(item, "phonetic_similarity", None) is None
+                            else f"{getattr(item, 'phonetic_similarity'):.0%}"
+                        ),
                         "字幕相似度": (
                             "—"
                             if item.subtitle_similarity is None
@@ -744,20 +758,26 @@ def _render_audio_report(report: AudioReviewReport) -> None:
             )
 
     issues = [
-        item for item in report.alignments if item.status != DialogueMatchStatus.matched
+        item
+        for item in report.alignments
+        if getattr(item.status, "value", item.status)
+        != DialogueMatchStatus.matched.value
     ]
     if not issues:
         st.success("当前 ASR 结果与剧本台词基本一致。请抽听关键时间码完成最终人工确认。")
     else:
         labels = {
-            DialogueMatchStatus.changed: "疑似改词",
-            DialogueMatchStatus.missing: "疑似漏词",
-            DialogueMatchStatus.extra: "疑似加词",
+            DialogueMatchStatus.changed.value: "疑似改词",
+            DialogueMatchStatus.missing.value: "疑似漏词",
+            DialogueMatchStatus.extra.value: "疑似加词",
         }
         for item in issues:
+            status_value = getattr(item.status, "value", item.status)
             time_range = f"{_timestamp(item.start_ms)}–{_timestamp(item.end_ms)}"
             expected = html.escape(item.expected_text or "—")
-            recognized = html.escape(item.recognized_text or "—")
+            recognized = html.escape(
+                to_simplified_chinese(item.recognized_text or "—")
+            )
             subtitle_evidence = ""
             if item.subtitle_text:
                 subtitle_time = (
@@ -770,10 +790,10 @@ def _render_audio_report(report: AudioReviewReport) -> None:
             speaker_suffix = f" · {html.escape(item.speaker)}" if item.speaker else ""
             st.markdown(
                 "<div class='finding'>"
-                f"<div class='finding-title'>{labels.get(item.status, '需复核')} · {time_range}</div>"
+                f"<div class='finding-title'>{labels.get(status_value, '需复核')} · {time_range}</div>"
                 f"<div class='panel-note'>{html.escape(item.reason)}</div>"
                 f"<div class='source-quote'><b>剧本 · 第{item.script_line_number or '—'}行{speaker_suffix}</b><br>“{expected}”</div>"
-                f"<div class='trace-quote'><b>ASR 音频证据</b><br>“{recognized}”</div>"
+                f"<div class='trace-quote'><b>ASR 音频证据（简体）</b><br>“{recognized}”</div>"
                 f"{subtitle_evidence}"
                 f"<div class='panel-note' style='margin-top:10px'><b>建议：</b>{html.escape(item.suggestion)}</div>"
                 "</div>",
@@ -786,7 +806,7 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                 {
                     "开始": _timestamp(segment.start_ms),
                     "结束": _timestamp(segment.end_ms),
-                    "ASR 文本": segment.text,
+                    "ASR 文本（简体）": to_simplified_chinese(segment.text),
                     "置信度": "—" if segment.confidence is None else f"{segment.confidence:.0%}",
                 }
                 for segment in report.transcript_segments
@@ -803,7 +823,7 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                     {
                         "开始": _timestamp(item.start_ms),
                         "结束": _timestamp(item.end_ms),
-                        "字幕文字": item.text,
+                        "字幕文字": to_simplified_chinese(item.text),
                         "置信度": f"{item.confidence:.0%}",
                     }
                     for item in report.subtitle_observations

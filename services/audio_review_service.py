@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
+from functools import lru_cache
 import hashlib
 import math
 from pathlib import Path
@@ -104,6 +105,26 @@ _NON_DIALOGUE_LABELS = {
     "场景介绍",
 }
 _VOICE_ROLES = {"旁白", "画外音", "内心独白", "系统音", "系统", "众人", "广播"}
+_SEMANTIC_REPLACEMENTS = (
+    ("没有办法", "无法"),
+    ("没办法", "无法"),
+    ("不可以", "不能"),
+    ("不允许", "不能"),
+    ("马上", "立即"),
+    ("立刻", "立即"),
+    ("这一个", "这个"),
+    ("那一个", "那个"),
+)
+_CONTRAST_PAIRS = (
+    ("左手", "右手"),
+    ("左脸", "右脸"),
+    ("之前", "之后"),
+    ("里面", "外面"),
+    ("进入", "出去"),
+    ("买入", "卖出"),
+    ("打开", "关上"),
+    ("开启", "关闭"),
+)
 
 
 class AudioReviewError(RuntimeError):
@@ -115,6 +136,14 @@ class TranscriptionResult:
     segments: list[TranscriptSegment]
     language: str | None = None
     language_probability: float | None = None
+
+
+@dataclass(frozen=True)
+class TextEquivalence:
+    kind: str | None
+    text_similarity: float
+    phonetic_similarity: float
+    semantic_similarity: float
 
 
 class SpeechTranscriber(Protocol):
@@ -200,7 +229,7 @@ class RapidOcrSubtitleReader:
         if texts is None or scores is None:
             return []
         return [
-            (str(text).strip(), float(score))
+            (to_simplified_chinese(str(text).strip()), float(score))
             for text, score in zip(texts, scores)
             if str(text).strip()
         ]
@@ -430,7 +459,103 @@ def _plausible_speaker(speaker: str, discovered_characters: set[str]) -> bool:
 
 def normalize_dialogue(text: str) -> str:
     """保留中英文、数字，消除标点和空白对齐噪声。"""
-    return "".join(re.findall(r"[\u3400-\u9fffA-Za-z0-9]", text)).lower()
+    simplified = to_simplified_chinese(text)
+    return "".join(re.findall(r"[\u3400-\u9fffA-Za-z0-9]", simplified)).lower()
+
+
+@lru_cache(maxsize=1)
+def _traditional_to_simplified_converter():
+    try:
+        from opencc import OpenCC
+    except ImportError:
+        return None
+    return OpenCC("t2s")
+
+
+@lru_cache(maxsize=4096)
+def to_simplified_chinese(text: str) -> str:
+    """统一用户可见证据与比较文本为简体中文；缺依赖时保持原文。"""
+    converter = _traditional_to_simplified_converter()
+    return converter.convert(text) if converter is not None else text
+
+
+@lru_cache(maxsize=4096)
+def _phonetic_form(text: str) -> str:
+    compact = normalize_dialogue(text)
+    if not compact:
+        return ""
+    try:
+        from pypinyin import Style, lazy_pinyin
+    except ImportError:
+        return ""
+    syllables = lazy_pinyin(
+        compact,
+        style=Style.TONE3,
+        neutral_tone_with_five=True,
+        strict=False,
+        errors=lambda value: list(value),
+    )
+    return "|".join(syllables)
+
+
+def _semantic_form(text: str) -> str:
+    value = normalize_dialogue(text)
+    for source, target in _SEMANTIC_REPLACEMENTS:
+        value = value.replace(source, target)
+    return value
+
+
+def _semantic_guards_match(expected: str, actual: str) -> bool:
+    left = _semantic_form(expected)
+    right = _semantic_form(actual)
+    if re.findall(r"\d+(?:\.\d+)?", left) != re.findall(r"\d+(?:\.\d+)?", right):
+        return False
+    negations = ("不", "没", "未", "无", "别", "莫", "禁止")
+    if [item for item in negations if item in left] != [
+        item for item in negations if item in right
+    ]:
+        return False
+    for first, second in _CONTRAST_PAIRS:
+        if (first in left and second in right) or (
+            second in left and first in right
+        ):
+            return False
+    return True
+
+
+def assess_text_equivalence(expected: str, actual: str) -> TextEquivalence:
+    """按简体字面、带声调拼音、受保护的轻量语义依次判定等价。"""
+    text_similarity = _text_similarity(expected, actual)
+    left_pinyin = _phonetic_form(expected)
+    right_pinyin = _phonetic_form(actual)
+    phonetic_similarity = (
+        SequenceMatcher(None, left_pinyin, right_pinyin, autojunk=False).ratio()
+        if left_pinyin and right_pinyin
+        else 0.0
+    )
+    left_semantic = _semantic_form(expected)
+    right_semantic = _semantic_form(actual)
+    semantic_similarity = (
+        SequenceMatcher(None, left_semantic, right_semantic, autojunk=False).ratio()
+        if left_semantic and right_semantic
+        else 0.0
+    )
+    kind: str | None = None
+    if text_similarity >= 0.98:
+        kind = "简体字面一致"
+    elif (
+        min(len(normalize_dialogue(expected)), len(normalize_dialogue(actual))) >= 3
+        and phonetic_similarity >= 0.98
+    ):
+        kind = "读音一致"
+    elif semantic_similarity >= 0.94 and _semantic_guards_match(expected, actual):
+        kind = "轻量语义一致"
+    return TextEquivalence(
+        kind=kind,
+        text_similarity=text_similarity,
+        phonetic_similarity=phonetic_similarity,
+        semantic_similarity=semantic_similarity,
+    )
 
 
 def extract_subtitle_observations(
@@ -542,7 +667,7 @@ def fuse_subtitle_evidence(
     alignments: list[DialogueAlignment],
     observations: list[SubtitleObservation],
 ) -> tuple[list[DialogueAlignment], int]:
-    """用独立字幕证据消除 ASR 同音字误报，但不掩盖真正的无声/漏录。"""
+    """字幕与剧本或音频任一证据等价时消歧，但不掩盖真正的无声/漏录。"""
     if not observations:
         return alignments, 0
     fused: list[DialogueAlignment] = []
@@ -553,16 +678,38 @@ def fuse_subtitle_evidence(
             fused.append(alignment)
             continue
         candidates = _subtitle_candidates(alignment, observations)
-        scored = [
-            (_text_similarity(alignment.expected_text, item.text), item)
-            for item in candidates
-            if item.id not in used_observations
-        ]
+        scored = []
+        for item in candidates:
+            if item.id in used_observations:
+                continue
+            script_equivalence = assess_text_equivalence(
+                alignment.expected_text, item.text
+            )
+            audio_equivalence = assess_text_equivalence(
+                alignment.recognized_text or "", item.text
+            )
+            evidence_score = max(
+                script_equivalence.text_similarity,
+                script_equivalence.phonetic_similarity,
+                script_equivalence.semantic_similarity,
+                audio_equivalence.text_similarity,
+                audio_equivalence.phonetic_similarity,
+                audio_equivalence.semantic_similarity,
+            )
+            scored.append(
+                (evidence_score, script_equivalence, audio_equivalence, item)
+            )
         if not scored:
             fused.append(alignment)
             continue
-        subtitle_similarity, subtitle = max(scored, key=lambda pair: pair[0])
-        if subtitle_similarity < 0.35:
+        evidence_score, script_equivalence, audio_equivalence, subtitle = max(
+            scored, key=lambda pair: pair[0]
+        )
+        if (
+            evidence_score < 0.35
+            and script_equivalence.kind is None
+            and audio_equivalence.kind is None
+        ):
             fused.append(alignment)
             continue
 
@@ -570,25 +717,31 @@ def fuse_subtitle_evidence(
             "subtitle_text": subtitle.text,
             "subtitle_start_ms": subtitle.start_ms,
             "subtitle_end_ms": subtitle.end_ms,
-            "subtitle_similarity": subtitle_similarity,
+            "subtitle_similarity": script_equivalence.text_similarity,
         }
+        status_value = getattr(alignment.status, "value", alignment.status)
         if (
-            alignment.status == DialogueMatchStatus.changed
-            and subtitle_similarity >= 0.78
+            status_value == DialogueMatchStatus.changed.value
+            and (script_equivalence.kind or audio_equivalence.kind)
         ):
+            if script_equivalence.kind:
+                basis = f"画面字幕与剧本{script_equivalence.kind}"
+            else:
+                basis = f"音频与画面字幕{audio_equivalence.kind}"
             updates.update(
                 {
                     "status": DialogueMatchStatus.matched,
                     "resolved_by_subtitle": True,
-                    "reason": "画面字幕与剧本高度一致；音频差异更可能是同音字或 ASR 误识别",
-                    "suggestion": "已由字幕交叉确认；仍建议抽听时间码，确认成片发音清晰",
+                    "evidence_match_basis": basis,
+                    "reason": f"{basis}；三方证据表明差异更可能来自繁简体、同音字或 ASR 误识别",
+                    "suggestion": "系统已判定一致；关键台词仍可按时间码抽听确认",
                 }
             )
             rescued_count += 1
             used_observations.add(subtitle.id)
         elif (
-            alignment.status == DialogueMatchStatus.missing
-            and subtitle_similarity >= 0.78
+            status_value == DialogueMatchStatus.missing.value
+            and script_equivalence.kind
         ):
             updates.update(
                 {
@@ -596,7 +749,7 @@ def fuse_subtitle_evidence(
                     "suggestion": "回听字幕对应时间码，区分漏录、音量过低与 ASR 未识别",
                 }
             )
-        elif alignment.status == DialogueMatchStatus.changed:
+        elif status_value == DialogueMatchStatus.changed.value:
             updates.update(
                 {
                     "reason": "音频与画面字幕都未能充分确认剧本原句，仍需人工复核",
@@ -677,18 +830,35 @@ def align_dialogues(
         start_ms, end_ms, recognized = _actual_evidence(
             actual, actual_indexes, transcript_segments, transcript_ranges
         )
-        if coverage >= 0.78:
+        equivalence = assess_text_equivalence(row.text, recognized) if recognized else None
+        if coverage >= 0.98:
             status = DialogueMatchStatus.matched
             reason = "成片语音与剧本台词基本一致"
             suggestion = "无需修改；仍建议抽听时间码确认 ASR 没有误识别"
+            evidence_match_basis = "字符对齐一致"
+            resolved_by_audio = False
+        elif equivalence is not None and equivalence.kind:
+            status = DialogueMatchStatus.matched
+            reason = f"音频证据与剧本{equivalence.kind}，判定成片台词一致"
+            suggestion = "无需修改；关键台词仍建议按时间码抽听确认"
+            evidence_match_basis = f"音频与剧本{equivalence.kind}"
+            resolved_by_audio = True
+            if actual_indexes:
+                matched_actual_positions.update(
+                    range(min(actual_indexes), max(actual_indexes) + 1)
+                )
         elif coverage >= 0.42:
             status = DialogueMatchStatus.changed
             reason = "成片语音只匹配到部分剧本台词，可能存在错词、改词或 ASR 误识别"
             suggestion = "回看对应时间码，确认后补录台词或将现场改词更新进剧本版本"
+            evidence_match_basis = None
+            resolved_by_audio = False
         else:
             status = DialogueMatchStatus.missing
             reason = "未在成片语音中稳定找到这句剧本台词"
             suggestion = "检查是否漏拍、漏录、被剪掉，或 ASR 因噪声未识别"
+            evidence_match_basis = None
+            resolved_by_audio = False
         alignments.append(
             DialogueAlignment(
                 id=f"alignment_{row.id}",
@@ -700,9 +870,74 @@ def align_dialogues(
                 start_ms=start_ms,
                 end_ms=end_ms,
                 similarity=min(1.0, coverage),
+                phonetic_similarity=(
+                    None if equivalence is None else equivalence.phonetic_similarity
+                ),
+                semantic_similarity=(
+                    None if equivalence is None else equivalence.semantic_similarity
+                ),
+                evidence_match_basis=evidence_match_basis,
+                resolved_by_audio=resolved_by_audio,
                 reason=reason,
                 suggestion=suggestion,
             )
+        )
+
+    # 当整句几乎全是同音字时，字符匹配可能找不到范围；再做一次段级读音/语义兜底。
+    claimed_fallback_segments: set[int] = set()
+    for alignment_index, alignment in enumerate(alignments):
+        if (
+            getattr(alignment.status, "value", alignment.status)
+            == DialogueMatchStatus.matched.value
+            or not alignment.expected_text
+        ):
+            continue
+        candidates: list[tuple[int, float, int, TranscriptSegment, TextEquivalence]] = []
+        for segment_index, segment in enumerate(transcript_segments):
+            if segment_index in claimed_fallback_segments:
+                continue
+            equivalence = assess_text_equivalence(alignment.expected_text, segment.text)
+            if not equivalence.kind:
+                continue
+            rank = {
+                "简体字面一致": 3,
+                "读音一致": 2,
+                "轻量语义一致": 1,
+            }[equivalence.kind]
+            candidates.append(
+                (
+                    rank,
+                    max(
+                        equivalence.text_similarity,
+                        equivalence.phonetic_similarity,
+                        equivalence.semantic_similarity,
+                    ),
+                    segment_index,
+                    segment,
+                    equivalence,
+                )
+            )
+        if not candidates:
+            continue
+        _, _, segment_index, segment, equivalence = max(
+            candidates, key=lambda item: (item[0], item[1])
+        )
+        segment_left, segment_right = transcript_ranges[segment_index]
+        matched_actual_positions.update(range(segment_left, segment_right))
+        claimed_fallback_segments.add(segment_index)
+        alignments[alignment_index] = alignment.model_copy(
+            update={
+                "status": DialogueMatchStatus.matched,
+                "recognized_text": to_simplified_chinese(segment.text),
+                "start_ms": segment.start_ms,
+                "end_ms": segment.end_ms,
+                "phonetic_similarity": equivalence.phonetic_similarity,
+                "semantic_similarity": equivalence.semantic_similarity,
+                "evidence_match_basis": f"音频与剧本{equivalence.kind}",
+                "resolved_by_audio": True,
+                "reason": f"音频证据与剧本{equivalence.kind}，判定成片台词一致",
+                "suggestion": "无需修改；关键台词仍建议按时间码抽听确认",
+            }
         )
 
     # 如果某个 ASR 片段的大部分字符没有参与任何匹配，将它作为疑似临场加词。
@@ -715,7 +950,7 @@ def align_dialogues(
             DialogueAlignment(
                 id=f"alignment_extra_{segment.id}",
                 status=DialogueMatchStatus.extra,
-                recognized_text=segment.text,
+                recognized_text=to_simplified_chinese(segment.text),
                 start_ms=segment.start_ms,
                 end_ms=segment.end_ms,
                 similarity=matched / segment_length,
@@ -801,10 +1036,20 @@ class AudioReviewService:
         started = time.perf_counter()
         quality = extract_audio_track(video_path, wav_path)
         transcription = self._transcriber.transcribe(wav_path)
+        transcript_segments = [
+            TranscriptSegment.model_validate(_model_payload(item)).model_copy(
+                update={
+                    "text": to_simplified_chinese(
+                        str(_model_payload(item).get("text", ""))
+                    )
+                }
+            )
+            for item in transcription.segments
+        ]
         parse_result = parse_script_dialogues(script_text)
         script_dialogues = parse_result.dialogues
         alignments, overall_similarity = align_dialogues(
-            script_dialogues, transcription.segments
+            script_dialogues, transcript_segments
         )
         subtitle_observations: list[SubtitleObservation] = []
         ocr_frame_count = 0
@@ -817,7 +1062,7 @@ class AudioReviewService:
                     self._subtitle_reader,
                     target_timestamps_ms=[
                         (item.start_ms + item.end_ms) // 2
-                        for item in transcription.segments
+                        for item in transcript_segments
                     ],
                 )
                 alignments, ocr_rescued_count = fuse_subtitle_evidence(
@@ -840,7 +1085,7 @@ class AudioReviewService:
             # Streamlit 热更新可能让缓存的 ASR 仍返回旧模块中的 Pydantic
             # 实例。字段完全相同但类身份不同，Pydantic v2 会逐条拒绝。
             # 在报告契约边界统一降为普通字典，重新按当前 schema 校验。
-            transcript_segments=[_model_payload(item) for item in transcription.segments],
+            transcript_segments=[_model_payload(item) for item in transcript_segments],
             script_dialogues=[_model_payload(item) for item in script_dialogues],
             ignored_script_lines=[
                 _model_payload(item) for item in parse_result.ignored_lines
@@ -903,7 +1148,11 @@ def _actual_evidence(
     ]
     if not selected:
         return None, None, actual[left:right]
-    return selected[0].start_ms, selected[-1].end_ms, "".join(item.text for item in selected)
+    return (
+        selected[0].start_ms,
+        selected[-1].end_ms,
+        to_simplified_chinese("".join(item.text for item in selected)),
+    )
 
 
 def _all_missing(script_dialogues: list[ScriptDialogueLine]) -> list[DialogueAlignment]:

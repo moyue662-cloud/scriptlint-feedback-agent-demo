@@ -142,6 +142,10 @@ class DialogueAlignment(BaseModel):
     subtitle_start_ms: int | None = Field(default=None, ge=0)
     subtitle_end_ms: int | None = Field(default=None, ge=0)
     subtitle_similarity: float | None = Field(default=None, ge=0, le=1)
+    phonetic_similarity: float | None = Field(default=None, ge=0, le=1)
+    semantic_similarity: float | None = Field(default=None, ge=0, le=1)
+    evidence_match_basis: str | None = None
+    resolved_by_audio: bool = False
     resolved_by_subtitle: bool = False
     reason: str
     suggestion: str

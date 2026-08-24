@@ -20,12 +20,14 @@ from services.audio_review_service import (
     AudioReviewService,
     TranscriptionResult,
     align_dialogues,
+    assess_text_equivalence,
     extract_audio_track,
     extract_script_dialogues,
     extract_subtitle_observations,
     fuse_subtitle_evidence,
     normalize_dialogue,
     parse_script_dialogues,
+    to_simplified_chinese,
 )
 
 
@@ -145,6 +147,26 @@ def test_normalize_dialogue_removes_punctuation_but_keeps_meaningful_text():
     assert normalize_dialogue("账本，在 A-3 仓库！") == "账本在a3仓库"
 
 
+def test_traditional_asr_is_converted_to_simplified_chinese():
+    assert to_simplified_chinese("先讓他配說話") == "先让他配说话"
+    assert normalize_dialogue("項目暫停。") == "项目暂停"
+
+
+def test_tone_aware_phonetic_equivalence_accepts_same_pronunciation():
+    result = assess_text_equivalence("先让它配说话。", "先讓他配說話")
+
+    assert result.kind == "读音一致"
+    assert result.phonetic_similarity == pytest.approx(1.0)
+
+
+def test_lightweight_semantics_accepts_safe_synonym_but_rejects_opposite():
+    equivalent = assess_text_equivalence("马上开始", "立刻开始")
+    opposite = assess_text_equivalence("把门打开", "把门关上")
+
+    assert equivalent.kind == "轻量语义一致"
+    assert opposite.kind is None
+
+
 def test_exact_audio_transcript_matches_script_across_different_segments():
     rows = extract_script_dialogues("林夏：账本在仓库。\n周远：我现在就去！")
     alignments, score = align_dialogues(
@@ -162,6 +184,21 @@ def test_exact_audio_transcript_matches_script_across_different_segments():
     ]
     assert alignments[0].start_ms == 0
     assert alignments[1].end_ms == 2400
+
+
+def test_audio_homophone_matching_marks_screenshot_case_as_correct():
+    rows = extract_script_dialogues("陆衡：先让它配说话。")
+
+    alignments, _ = align_dialogues(
+        rows,
+        [_segment(1, "先讓他配說話", 330430, 331930)],
+    )
+
+    assert len(alignments) == 1
+    assert alignments[0].status == DialogueMatchStatus.matched
+    assert alignments[0].recognized_text == "先让他配说话"
+    assert alignments[0].resolved_by_audio is True
+    assert alignments[0].evidence_match_basis == "音频与剧本读音一致"
 
 
 def test_alignment_reports_changed_missing_and_extra_speech():

@@ -18,6 +18,8 @@ dependencies = [
     "numpy>=1.26,<3.0",
     "rapidocr>=3.9,<4.0",
     "onnxruntime>=1.23,<2.0",
+    "opencc-python-reimplemented>=0.1.7,<1.0",
+    "pypinyin>=0.55,<1.0",
 ]
 
 [project.optional-dependencies]
