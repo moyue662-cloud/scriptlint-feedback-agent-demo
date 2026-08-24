@@ -30,6 +30,8 @@ from services.audio_review_service import (
     fuse_subtitle_evidence,
     normalize_dialogue,
     parse_script_dialogues,
+    _prepare_ocr_targets,
+    _split_transcript_segments,
     to_simplified_chinese,
 )
 
@@ -368,6 +370,102 @@ def test_subtitle_rescues_low_confidence_asr_when_speech_overlaps():
     assert "不把 ASR 错字计为漏词" in fused[0].reason
 
 
+def test_subtitle_rescues_missing_alignment_with_separate_overlapping_speech():
+    alignment = DialogueAlignment(
+        id="alignment_missing",
+        status=DialogueMatchStatus.missing,
+        script_line_number=10,
+        speaker="陆衡",
+        expected_text="政策是文本。",
+        similarity=0,
+        reason="未找到",
+        suggestion="复核",
+    )
+    subtitle = SubtitleObservation(
+        id="subtitle_exact",
+        start_ms=1000,
+        end_ms=2200,
+        frame_number=20,
+        text="政策是文本。",
+        confidence=0.98,
+    )
+    speech = _segment(1, "正则是纹本", 900, 2300)
+
+    fused, rescued = fuse_subtitle_evidence(
+        [alignment], [subtitle], [speech]
+    )
+
+    assert rescued == 1
+    assert fused[0].status == DialogueMatchStatus.matched
+    assert fused[0].subtitle_start_ms == 1000
+
+
+def test_low_quality_single_character_asr_still_proves_speech_presence():
+    alignment = DialogueAlignment(
+        id="alignment_missing",
+        status=DialogueMatchStatus.missing,
+        script_line_number=10,
+        speaker="赵启明",
+        expected_text="政策是文本。",
+        similarity=0,
+        reason="未找到",
+        suggestion="复核",
+    )
+    subtitle = SubtitleObservation(
+        id="subtitle_exact",
+        start_ms=1000,
+        end_ms=3700,
+        frame_number=20,
+        text="政策是文本。",
+        confidence=0.98,
+    )
+    # 仅在字幕末尾有 120ms 的低质量 ASR 片段，模拟全片解码时间戳漂移。
+    speech = TranscriptSegment(
+        id="asr_bad",
+        start_ms=3580,
+        end_ms=5000,
+        text="政�",
+        confidence=0.61,
+    )
+
+    fused, rescued = fuse_subtitle_evidence(
+        [alignment], [subtitle], [speech]
+    )
+
+    assert rescued == 1
+    assert fused[0].status == DialogueMatchStatus.matched
+
+
+def test_subtitle_can_contain_one_complete_script_line():
+    alignment = DialogueAlignment(
+        id="alignment_changed",
+        status=DialogueMatchStatus.changed,
+        script_line_number=10,
+        speaker="陆衡",
+        expected_text="政策是文本。",
+        recognized_text="正则是纹本",
+        start_ms=1000,
+        end_ms=1800,
+        similarity=0.5,
+        reason="部分匹配",
+        suggestion="复核",
+    )
+    subtitle = SubtitleObservation(
+        id="subtitle_combined",
+        start_ms=1000,
+        end_ms=2200,
+        frame_number=20,
+        text="政策是文本，文本能检索。",
+        confidence=0.98,
+    )
+
+    fused, rescued = fuse_subtitle_evidence([alignment], [subtitle])
+
+    assert rescued == 1
+    assert fused[0].status == DialogueMatchStatus.matched
+    assert fused[0].evidence_match_basis == "画面字幕与剧本字面包含一致"
+
+
 def test_asr_context_uses_terms_without_copying_full_dialogue():
     parsed = parse_script_dialogues(
         "陆衡：政策是文本，文本能检索，检索就能答。\n赵启明：项目暂停。"
@@ -414,9 +512,44 @@ def test_faster_whisper_uses_multi_candidate_chinese_decode_options():
     assert result.segments[0].text == "政策是文本"
     assert captured["language"] == "zh"
     assert captured["beam_size"] == 5
+    assert captured["vad_filter"] is False
     assert captured["condition_on_previous_text"] is True
+    assert captured["word_timestamps"] is True
     assert captured["initial_prompt"] == "中文短剧对白"
     assert captured["hotwords"] == "陆衡 政策 文本"
+
+
+def test_word_timestamps_split_long_whisper_segment():
+    words = [
+        SimpleNamespace(start=0.0, end=0.6, word="第一句。", probability=0.9),
+        SimpleNamespace(start=0.7, end=1.5, word="第二句！", probability=0.8),
+        SimpleNamespace(start=2.1, end=2.7, word="第三句。", probability=0.7),
+    ]
+    raw = SimpleNamespace(
+        start=0.0,
+        end=2.7,
+        text="第一句。第二句！第三句。",
+        avg_logprob=-0.2,
+        words=words,
+    )
+
+    segments = _split_transcript_segments([raw])
+
+    assert [item.text for item in segments] == ["第一句。第二句！", "第三句。"]
+    assert segments[1].start_ms == 2100
+
+
+def test_ocr_targets_keep_regular_coverage_when_asr_anchors_exist():
+    targets = _prepare_ocr_targets(
+        [5000],
+        20,
+        duration_ms=10_000,
+        sample_interval_ms=1000,
+    )
+
+    assert targets[0] == 0
+    assert targets[-1] == 9000
+    assert len(targets) >= 10
 
 
 class _FakeSubtitleReader:

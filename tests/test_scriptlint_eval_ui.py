@@ -118,7 +118,9 @@ def test_audio_review_is_homepage_and_requires_video(tmp_path, monkeypatch):
     assert app.radio[0].value == "视频音频审片"
     assert app.file_uploader[0].label == "上传短剧成片"
     next(
-        button for button in app.button if button.label == "提取音轨并对照剧本审核"
+        button
+        for button in app.button
+        if button.label == "运行音频 + 字幕 + 画面基础审核"
     ).click().run(timeout=20)
     assert not app.exception
     assert any("请先上传视频文件" in item.value for item in app.warning)

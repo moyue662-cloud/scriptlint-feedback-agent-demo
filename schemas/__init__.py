@@ -76,6 +76,9 @@ from .multimodal import (
     ScriptDialogueParseResult,
     SubtitleObservation,
     TranscriptSegment,
+    VisualIssue,
+    VisualIssueType,
+    VisualQualityReport,
 )
 from .evaluation import (
     ClassifiedItem,
@@ -133,6 +136,9 @@ __all__ = [
     "DialogueAlignment",
     "AudioQualityMetrics",
     "AudioReviewReport",
+    "VisualIssue",
+    "VisualIssueType",
+    "VisualQualityReport",
     "RuleUseDecision",
     "RuleUseTrace",
     "FindingType",

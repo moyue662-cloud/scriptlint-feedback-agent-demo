@@ -188,3 +188,42 @@ class AudioReviewReport(BaseModel):
     quality: AudioQualityMetrics
     elapsed_ms: float = Field(ge=0)
     created_at: datetime
+
+
+class VisualIssueType(str, Enum):
+    black_frame = "black_frame"
+    blur = "blur"
+    freeze = "freeze"
+
+
+class VisualIssue(BaseModel):
+    """画面基础质量候选，只描述可测量信号，不推断剧情语义。"""
+
+    id: str
+    issue_type: VisualIssueType
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    frame_number: int = Field(ge=0)
+    score: float = Field(ge=0)
+    description: str
+
+    @model_validator(mode="after")
+    def _valid_visual_range(self) -> "VisualIssue":
+        if self.start_ms > self.end_ms:
+            raise ValueError("start_ms 不能大于 end_ms")
+        return self
+
+
+class VisualQualityReport(BaseModel):
+    """第一阶段非音频证据：镜头变化和画面基础质量。"""
+
+    sample_interval_ms: int = Field(gt=0)
+    sampled_frame_count: int = Field(ge=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    shot_change_count: int = Field(ge=0)
+    black_frame_count: int = Field(ge=0)
+    blur_frame_count: int = Field(ge=0)
+    freeze_span_count: int = Field(ge=0)
+    issues: list[VisualIssue] = Field(default_factory=list)
+    elapsed_ms: float = Field(ge=0)

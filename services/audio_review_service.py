@@ -35,8 +35,9 @@ from schemas.multimodal import (
 MAX_VIDEO_BYTES = 200 * 1024 * 1024
 MAX_AUDIO_DURATION_SECONDS = 12 * 60
 SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
-OCR_SAMPLE_INTERVAL_MS = 1500
-MAX_OCR_FRAMES = 240
+OCR_SAMPLE_INTERVAL_MS = 900
+MAX_OCR_FRAMES = 420
+MAX_ASR_SEGMENT_MS = 7000
 
 _NON_DIALOGUE_SECTIONS = {
     "作品信息",
@@ -193,30 +194,18 @@ class FasterWhisperTranscriber:
                 beam_size=3 if self.model_name == "tiny" else 5,
                 patience=1.2,
                 temperature=0.0,
-                vad_filter=True,
-                vad_parameters={
-                    "min_silence_duration_ms": 350,
-                    "speech_pad_ms": 250,
-                },
+                # 短剧常有连续 BGM，Silero VAD 会把配乐下的整段人声当成
+                # 非语音跳过。全时轴解码由 Whisper 自身 no_speech 判定，
+                # 避免字幕明明存在却出现 15–20 秒 ASR 空洞。
+                vad_filter=False,
                 condition_on_previous_text=True,
+                word_timestamps=True,
                 initial_prompt=initial_prompt,
                 hotwords=hotwords,
                 no_speech_threshold=0.5,
                 log_prob_threshold=-1.2,
             )
-            segments = [
-                TranscriptSegment(
-                    id=f"asr_{index:04d}",
-                    start_ms=max(0, round(segment.start * 1000)),
-                    end_ms=max(0, round(segment.end * 1000)),
-                    text=segment.text.strip(),
-                    confidence=_log_probability_to_confidence(
-                        getattr(segment, "avg_logprob", None)
-                    ),
-                )
-                for index, segment in enumerate(raw_segments, start=1)
-                if segment.text.strip()
-            ]
+            segments = _split_transcript_segments(list(raw_segments))
         except Exception as exc:  # pragma: no cover - 模型/媒体运行时错误
             raise AudioReviewError(f"语音转写失败：{exc}") from exc
         return TranscriptionResult(
@@ -660,7 +649,12 @@ def extract_subtitle_observations(
                 sample_interval_ms,
                 math.ceil(duration_ms / max_frames) if duration_ms else sample_interval_ms,
             )
-            targets = _prepare_ocr_targets(target_timestamps_ms or [], max_frames)
+            targets = _prepare_ocr_targets(
+                target_timestamps_ms or [],
+                max_frames,
+                duration_ms=duration_ms,
+                sample_interval_ms=adaptive_interval,
+            )
             target_index = 0
             next_sample_ms = 0
             decoded_frame_number = 0
@@ -726,10 +720,25 @@ def extract_subtitle_observations(
     return observations, sampled_frames
 
 
-def _prepare_ocr_targets(values: list[int], max_frames: int) -> list[int]:
+def _prepare_ocr_targets(
+    values: list[int],
+    max_frames: int,
+    *,
+    duration_ms: int = 0,
+    sample_interval_ms: int = OCR_SAMPLE_INTERVAL_MS,
+) -> list[int]:
+    # ASR 时间码只是额外锚点，不能取代全片扫描；否则一旦 ASR
+    # 漏听，同一句的字幕证据也会永久丢失。
+    regular = (
+        list(range(0, max(1, duration_ms), max(1, sample_interval_ms)))
+        if duration_ms
+        else []
+    )
     targets: list[int] = []
-    for value in sorted({max(0, int(item)) for item in values}):
-        if not targets or value - targets[-1] >= 450:
+    for value in sorted(
+        {max(0, int(item)) for item in [*regular, *values]}
+    ):
+        if not targets or value - targets[-1] >= 320:
             targets.append(value)
     if len(targets) <= max_frames:
         return targets
@@ -740,6 +749,7 @@ def _prepare_ocr_targets(values: list[int], max_frames: int) -> list[int]:
 def fuse_subtitle_evidence(
     alignments: list[DialogueAlignment],
     observations: list[SubtitleObservation],
+    transcript_segments: list[TranscriptSegment] | None = None,
 ) -> tuple[list[DialogueAlignment], int]:
     """字幕与剧本或音频任一证据等价时消歧，但不掩盖真正的无声/漏录。"""
     if not observations:
@@ -759,6 +769,11 @@ def fuse_subtitle_evidence(
                 continue
             script_equivalence = assess_text_equivalence(
                 alignment.expected_text, item.text
+            )
+            script_equivalence = _subtitle_equivalence(
+                alignment.expected_text,
+                item.text,
+                script_equivalence,
             )
             audio_equivalence = assess_text_equivalence(
                 alignment.recognized_text or "", item.text
@@ -817,17 +832,10 @@ def fuse_subtitle_evidence(
             status_value == DialogueMatchStatus.missing.value
             and script_equivalence.kind
         ):
-            has_overlapping_speech = (
-                len(normalize_dialogue(alignment.recognized_text or "")) >= 2
-                and alignment.start_ms is not None
-                and alignment.end_ms is not None
-                and _time_overlap_ratio(
-                    alignment.start_ms,
-                    alignment.end_ms,
-                    subtitle.start_ms,
-                    subtitle.end_ms,
-                )
-                >= 0.2
+            has_overlapping_speech = _has_overlapping_speech(
+                alignment,
+                subtitle,
+                transcript_segments or [],
             )
             if has_overlapping_speech:
                 basis = (
@@ -890,6 +898,80 @@ def fuse_subtitle_evidence(
     return deduplicated, rescued_count
 
 
+def _subtitle_equivalence(
+    expected: str,
+    subtitle: str,
+    equivalence: TextEquivalence,
+) -> TextEquivalence:
+    """字幕 OCR 可能把相邻两行合并。只有完整剧本台词包含在字幕中
+    才作为证据；字幕只命中剧本片段不会被强行判对。
+    """
+    if equivalence.kind:
+        return equivalence
+    expected_normalized = normalize_dialogue(expected)
+    subtitle_normalized = normalize_dialogue(subtitle)
+    if (
+        len(expected_normalized) >= 4
+        and expected_normalized in subtitle_normalized
+        and _semantic_guards_match(expected, subtitle)
+    ):
+        return TextEquivalence(
+            kind="字面包含一致",
+            text_similarity=max(equivalence.text_similarity, 0.98),
+            phonetic_similarity=equivalence.phonetic_similarity,
+            semantic_similarity=equivalence.semantic_similarity,
+        )
+    if (
+        len(expected_normalized) >= 7
+        and equivalence.text_similarity >= 0.92
+        and max(len(expected_normalized), len(subtitle_normalized))
+        <= min(len(expected_normalized), len(subtitle_normalized)) + 2
+        and _semantic_guards_match(expected, subtitle)
+    ):
+        return TextEquivalence(
+            kind="OCR 高相似一致",
+            text_similarity=equivalence.text_similarity,
+            phonetic_similarity=equivalence.phonetic_similarity,
+            semantic_similarity=equivalence.semantic_similarity,
+        )
+    return equivalence
+
+
+def _has_overlapping_speech(
+    alignment: DialogueAlignment,
+    subtitle: SubtitleObservation,
+    transcript_segments: list[TranscriptSegment],
+) -> bool:
+    if (
+        len(normalize_dialogue(alignment.recognized_text or "")) >= 2
+        and alignment.start_ms is not None
+        and alignment.end_ms is not None
+        and _time_overlap_ratio(
+            alignment.start_ms,
+            alignment.end_ms,
+            subtitle.start_ms,
+            subtitle.end_ms,
+        )
+        >= 0.2
+    ):
+        return True
+    return any(
+        # ASR 可能只返回一个汉字或替换符，但这仍然是模型在该
+        # 时间窗检测到语音的证据。文字正确性由字幕与剧本互证。
+        bool(segment.text.strip())
+        and segment.confidence is not None
+        and segment.confidence >= 0.12
+        and _time_overlap_ratio(
+            subtitle.start_ms,
+            subtitle.end_ms,
+            segment.start_ms,
+            segment.end_ms,
+        )
+        >= 0.03
+        for segment in transcript_segments
+    )
+
+
 def _subtitle_candidates(
     alignment: DialogueAlignment,
     observations: list[SubtitleObservation],
@@ -902,7 +984,10 @@ def _subtitle_candidates(
         for item in observations
         if item.end_ms >= alignment.start_ms - 2500 and item.start_ms <= end_ms + 2500
     ]
-    return nearby or observations
+    # ASR 严重错字时，全局字符对齐可能把剧本行指到错误时间段。
+    # 保留附近字幕的优先顺序，但允许用全片中的唯一完整字幕纠正。
+    nearby_ids = {item.id for item in nearby}
+    return [*nearby, *(item for item in observations if item.id not in nearby_ids)]
 
 
 def _text_similarity(expected: str, actual: str) -> float:
@@ -1235,7 +1320,9 @@ class AudioReviewService:
                     ],
                 )
                 alignments, ocr_rescued_count = fuse_subtitle_evidence(
-                    alignments, subtitle_observations
+                    alignments,
+                    subtitle_observations,
+                    transcript_segments,
                 )
             except AudioReviewError as exc:
                 ocr_warnings.append(str(exc))
@@ -1290,6 +1377,99 @@ def _model_payload(value: object) -> object:
     if callable(model_dump):
         return model_dump(mode="python")
     return value
+
+
+def _split_transcript_segments(raw_segments: list[object]) -> list[TranscriptSegment]:
+    """优先使用 Whisper 词级时间戳重切过长片段。
+
+    连续配乐会让 VAD 把数十句台词合并为 30 多秒的一段，进而使
+    每句剧本都显示整段 ASR 文字。这里按静音、句末和最大时长分段。
+    """
+    output: list[TranscriptSegment] = []
+
+    def append_segment(
+        *, start: float, end: float, text: str, confidence: float | None
+    ) -> None:
+        cleaned = text.strip()
+        if not cleaned:
+            return
+        output.append(
+            TranscriptSegment(
+                id=f"asr_{len(output) + 1:04d}",
+                start_ms=max(0, round(start * 1000)),
+                end_ms=max(0, round(end * 1000)),
+                text=cleaned,
+                confidence=confidence,
+            )
+        )
+
+    for raw in raw_segments:
+        words = [word for word in (getattr(raw, "words", None) or []) if getattr(word, "word", "").strip()]
+        fallback_confidence = _log_probability_to_confidence(
+            getattr(raw, "avg_logprob", None)
+        )
+        if not words:
+            append_segment(
+                start=float(getattr(raw, "start", 0.0)),
+                end=float(getattr(raw, "end", 0.0)),
+                text=str(getattr(raw, "text", "")),
+                confidence=fallback_confidence,
+            )
+            continue
+
+        chunk: list[object] = []
+        previous_end: float | None = None
+        for word in words:
+            word_start = float(getattr(word, "start", previous_end or 0.0))
+            word_end = float(getattr(word, "end", word_start))
+            if chunk and previous_end is not None and word_start - previous_end >= 0.42:
+                _append_word_chunk(output, chunk, fallback_confidence)
+                chunk = []
+            chunk.append(word)
+            previous_end = word_end
+            chunk_start = float(getattr(chunk[0], "start", word_start))
+            token = str(getattr(word, "word", "")).strip()
+            at_sentence_end = bool(re.search(r"[.!?。！？；;]”?\s*$", token))
+            if (
+                word_end * 1000 - chunk_start * 1000 >= MAX_ASR_SEGMENT_MS
+                or (at_sentence_end and word_end - chunk_start >= 0.8)
+            ):
+                _append_word_chunk(output, chunk, fallback_confidence)
+                chunk = []
+        if chunk:
+            _append_word_chunk(output, chunk, fallback_confidence)
+    return output
+
+
+def _append_word_chunk(
+    output: list[TranscriptSegment],
+    words: list[object],
+    fallback_confidence: float | None,
+) -> None:
+    if not words:
+        return
+    probabilities = [
+        float(value)
+        for word in words
+        if (value := getattr(word, "probability", None)) is not None
+    ]
+    confidence = (
+        round(sum(probabilities) / len(probabilities), 4)
+        if probabilities
+        else fallback_confidence
+    )
+    text = "".join(str(getattr(word, "word", "")) for word in words).strip()
+    if not text:
+        return
+    output.append(
+        TranscriptSegment(
+            id=f"asr_{len(output) + 1:04d}",
+            start_ms=max(0, round(float(getattr(words[0], "start", 0.0)) * 1000)),
+            end_ms=max(0, round(float(getattr(words[-1], "end", 0.0)) * 1000)),
+            text=text,
+            confidence=confidence,
+        )
+    )
 
 
 def _ranges(parts: list[str]) -> list[tuple[int, int]]:

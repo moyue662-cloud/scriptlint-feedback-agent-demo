@@ -17,7 +17,12 @@ import streamlit as st
 from config import PROJECT_ROOT
 from eval.run_scriptlint_eval import run_scriptlint_eval
 from repositories import SQLiteRepository
-from schemas.multimodal import AudioReviewReport, DialogueMatchStatus
+from schemas.multimodal import (
+    AudioReviewReport,
+    DialogueMatchStatus,
+    VisualIssueType,
+    VisualQualityReport,
+)
 from schemas.scriptlint import (
     RuleUseDecision,
     ScriptAgentResult,
@@ -42,12 +47,13 @@ from services.audio_review_service import (
     parse_script_dialogues,
     to_simplified_chinese,
 )
+from services.visual_review_service import analyze_visual_track
 
 
 CST = timezone(timedelta(hours=8))
 TEAM_ID = "team_scriptlint_demo"
 DEFAULT_PROJECT_ID = "project_my_short_drama"
-APP_BUILD = "audio-review-v4 · 2026-08-24"
+APP_BUILD = "multimodal-foundation-v1 · 2026-08-25"
 DEMO_SCRIPT = """第3集 内景 灵堂 日
 女主左手缠着厚厚的绷带，却用左手提起沉重的箱子。
 男主左脸有一道新伤。
@@ -185,6 +191,7 @@ def _runtime_schema_epoch() -> str:
             ScriptAuditTask,
             ScriptAgentResult,
             AudioReviewReport,
+            VisualQualityReport,
             FasterWhisperTranscriber,
             RapidOcrSubtitleReader,
         )
@@ -335,8 +342,8 @@ def _sidebar(repo: SQLiteRepository) -> None:
         st.markdown("<div style='font-size:12px;line-height:1.9;color:#bdc3d1;'>"
                     "<span style='color:#60d6b1'>●</span> 本地 SQLite<br>"
                     "<span style='color:#60d6b1'>●</span> 六类文本审计<br>"
-                    "<span style='color:#60d6b1'>●</span> 视频音轨 ASR 对齐</div>", unsafe_allow_html=True)
-        st.caption("当前可审视频音轨；画面动作、表情、服化道仍是后续视觉阶段。")
+                    "<span style='color:#60d6b1'>●</span> 音频·字幕·画面质量时间线</div>", unsafe_allow_html=True)
+        st.caption("已完成画面技术信号抽检；人物动作、表情、服化道语义仍属后续视觉阶段。")
 
 
 def _header() -> None:
@@ -345,7 +352,7 @@ def _header() -> None:
         '<h1>从剧本到成片，问题都有证据。</h1>'
         '<p>上传成片后提取音轨、生成时间码转写并与剧本台词对齐；同时检查人物动作、外观、'
         '知情边界与道具连续性，把编导纠正沉淀为后续版本可复用的项目规则。</p></div>'
-        '<div class="mode-pill"><span class="mode-dot"></span>视频音频审片 MVP</div></div>',
+        '<div class="mode-pill"><span class="mode-dot"></span>多模态审片 · Foundation</div></div>',
         unsafe_allow_html=True,
     )
     stage = st.session_state.get("demo_stage", 1)
@@ -645,6 +652,7 @@ def _timestamp(milliseconds: int | None) -> str:
 def _clear_audio_result() -> None:
     st.session_state.pop("audio_review_report", None)
     st.session_state.pop("audio_script_result", None)
+    st.session_state.pop("visual_review_report", None)
 
 
 def _ensure_current_build_state() -> None:
@@ -898,9 +906,60 @@ def _render_audio_report(report: AudioReviewReport) -> None:
     )
 
 
+def _render_visual_report(report: VisualQualityReport) -> None:
+    st.markdown("<div class='section-label'>画面基础质量扫描 · 多模态第一步</div>", unsafe_allow_html=True)
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("抽检帧", report.sampled_frame_count)
+    c2.metric("镜头变化", report.shot_change_count)
+    c3.metric("黑帧帧", report.black_frame_count)
+    c4.metric("极端模糊帧", report.blur_frame_count)
+    c5.metric("长静止镜头", report.freeze_span_count)
+    st.caption(
+        f"画面规格：{report.width}×{report.height} · 抽帧间隔："
+        f"{report.sample_interval_ms}ms · 处理耗时：{report.elapsed_ms / 1000:.1f}s"
+    )
+    if not report.issues:
+        st.success("未发现持续黑帧、极端模糊或超长静止镜头候选。")
+    else:
+        labels = {
+            VisualIssueType.black_frame: "疑似黑帧",
+            VisualIssueType.blur: "疑似失焦",
+            VisualIssueType.freeze: "长静止镜头",
+        }
+        st.warning(
+            f"发现 {len(report.issues)} 个画面质量候选；动画的静止镜头、"
+            "转场黑帧可能是创作设计，需由编导按时间码确认。"
+        )
+        st.dataframe(
+            [
+                {
+                    "类型": labels[item.issue_type],
+                    "开始": _timestamp(item.start_ms),
+                    "结束": _timestamp(item.end_ms),
+                    "起始帧": item.frame_number,
+                    "信号值": f"{item.score:.2f}",
+                    "说明": item.description,
+                }
+                for item in report.issues
+            ],
+            hide_index=True,
+            **_stretch(st.dataframe),
+        )
+    st.info(
+        "当前画面层只识别技术信号和镜头边界，不声称已理解人物、动作、"
+        "表情、服装或道具。后续视觉 Agent 将复用这些时间码和镜头边界。"
+    )
+    st.download_button(
+        "下载画面基础扫描 JSON",
+        data=json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2),
+        file_name="scriptlint_visual_review.json",
+        mime="application/json",
+    )
+
+
 def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
     st.markdown(
-        '<div class="panel"><div class="panel-title">视频音频审片</div>'
+        '<div class="panel"><div class="panel-title">短剧成片多证据审核</div>'
         '<div class="panel-note">上传成片 → 提取音轨做中文 ASR → 抽取下半屏硬字幕 → '
         '与剧本“角色：台词”三方比对。字幕可辅助消除同音字误报；第一次运行会下载模型。</div>',
         unsafe_allow_html=True,
@@ -961,8 +1020,14 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         st.caption(f"● 字幕 OCR 运行环境就绪 · {ocr_status}")
     else:
         st.warning(f"字幕 OCR 暂不可用，本轮会自动使用纯音频审片。原因：{ocr_status}")
+    use_visual_scan = st.checkbox(
+        "启用画面基础质量扫描（试验）",
+        value=True,
+        help="抽帧检测黑帧、极端模糊、长静止镜头与镜头变化；不会识别人脸或保存原始画面。",
+        on_change=_clear_audio_result,
+    )
     run_audio = st.button(
-        "提取音轨并对照剧本审核",
+        "运行音频 + 字幕 + 画面基础审核",
         type="primary",
         **_stretch(st.button),
     )
@@ -983,7 +1048,7 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         else:
             suffix = Path(video.name).suffix.lower()
             try:
-                with st.spinner("正在提取音轨、识别语音并抽取画面字幕…"):
+                with st.spinner("正在提取音轨、识别语音、抽取字幕并扫描画面质量…"):
                     with tempfile.TemporaryDirectory(prefix="scriptlint_audio_") as temp_dir:
                         video_path = Path(temp_dir) / f"source{suffix}"
                         wav_path = Path(temp_dir) / "audio.wav"
@@ -1010,6 +1075,10 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
                         if ocr_startup_warning:
                             report.ocr_warnings.insert(0, ocr_startup_warning)
                         st.session_state["audio_review_report"] = report
+                        if use_visual_scan:
+                            st.session_state["visual_review_report"] = analyze_visual_track(
+                                video_path
+                            )
                         st.session_state["audio_script_result"] = _run(agent, _new_task())
             except AudioReviewError as exc:
                 st.error(str(exc))
@@ -1019,6 +1088,11 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
     report: AudioReviewReport | None = st.session_state.get("audio_review_report")
     if report:
         _render_audio_report(report)
+        visual_report: VisualQualityReport | None = st.session_state.get(
+            "visual_review_report"
+        )
+        if visual_report:
+            _render_visual_report(visual_report)
         script_result: ScriptAgentResult | None = st.session_state.get("audio_script_result")
         if script_result and script_result.task.project_id == _project_id():
             with st.expander(
