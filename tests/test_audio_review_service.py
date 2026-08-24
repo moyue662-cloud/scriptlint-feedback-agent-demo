@@ -201,6 +201,14 @@ def test_audio_homophone_matching_marks_screenshot_case_as_correct():
     assert alignments[0].evidence_match_basis == "音频与剧本读音一致"
 
 
+def test_non_speech_dash_is_never_reported_as_extra_speech():
+    rows = extract_script_dialogues("陆衡：先让它说话。")
+
+    alignments, _ = align_dialogues(rows, [_segment(1, "——", 0, 600)])
+
+    assert [item.status for item in alignments] == [DialogueMatchStatus.missing]
+
+
 def test_alignment_reports_changed_missing_and_extra_speech():
     rows = extract_script_dialogues(
         "林夏：账本就在城南仓库。\n周远：你留在这里等我。"
@@ -254,6 +262,48 @@ def test_subtitle_can_resolve_asr_homophone_change():
     assert fused[0].status == DialogueMatchStatus.matched
     assert fused[0].resolved_by_subtitle is True
     assert fused[0].subtitle_text == subtitle.text
+
+
+def test_subtitle_rescue_removes_overlapping_duplicate_extra_speech():
+    changed = DialogueAlignment(
+        id="alignment_changed",
+        status=DialogueMatchStatus.changed,
+        script_line_number=80,
+        speaker="陆衡",
+        expected_text="先让它配说话。",
+        recognized_text="先让他配说话",
+        start_ms=1000,
+        end_ms=2200,
+        similarity=0.7,
+        reason="部分匹配",
+        suggestion="复核",
+    )
+    duplicate_extra = DialogueAlignment(
+        id="alignment_extra_same_segment",
+        status=DialogueMatchStatus.extra,
+        recognized_text="先让他配说话",
+        start_ms=1000,
+        end_ms=2200,
+        similarity=0.2,
+        reason="未匹配",
+        suggestion="复核",
+    )
+    subtitle = SubtitleObservation(
+        id="subtitle_same_segment",
+        start_ms=1000,
+        end_ms=2200,
+        frame_number=12,
+        text="先让它配说话。",
+        confidence=0.98,
+    )
+
+    fused, rescued = fuse_subtitle_evidence(
+        [changed, duplicate_extra], [subtitle]
+    )
+
+    assert rescued == 1
+    assert len(fused) == 1
+    assert fused[0].status == DialogueMatchStatus.matched
 
 
 def test_subtitle_does_not_hide_missing_audio():

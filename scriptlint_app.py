@@ -38,6 +38,7 @@ from services.audio_review_service import (
     FasterWhisperTranscriber,
     MAX_VIDEO_BYTES,
     RapidOcrSubtitleReader,
+    normalize_dialogue,
     parse_script_dialogues,
     to_simplified_chinese,
 )
@@ -699,7 +700,7 @@ def _render_audio_report(report: AudioReviewReport) -> None:
     c2.metric("基本一致", report.matched_count)
     c3.metric("疑似改词", report.changed_count)
     c4.metric("疑似漏词", report.missing_count)
-    c5.metric("疑似加词", report.extra_count)
+    c5.metric("未匹配语音", report.extra_count)
     c6.metric("证据消歧", len(rescued))
     st.caption(
         f"ASR 模型：{report.model_name} · 识别语言：{report.detected_language or '未知'} · "
@@ -761,15 +762,20 @@ def _render_audio_report(report: AudioReviewReport) -> None:
         item
         for item in report.alignments
         if getattr(item.status, "value", item.status)
-        != DialogueMatchStatus.matched.value
+        in {DialogueMatchStatus.changed.value, DialogueMatchStatus.missing.value}
+    ]
+    unmatched_speech = [
+        item
+        for item in report.alignments
+        if getattr(item.status, "value", item.status)
+        == DialogueMatchStatus.extra.value
     ]
     if not issues:
-        st.success("当前 ASR 结果与剧本台词基本一致。请抽听关键时间码完成最终人工确认。")
+        st.success("当前未发现疑似改词或漏词。请抽听关键时间码完成最终人工确认。")
     else:
         labels = {
             DialogueMatchStatus.changed.value: "疑似改词",
             DialogueMatchStatus.missing.value: "疑似漏词",
-            DialogueMatchStatus.extra.value: "疑似加词",
         }
         for item in issues:
             status_value = getattr(item.status, "value", item.status)
@@ -798,6 +804,29 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                 f"<div class='panel-note' style='margin-top:10px'><b>建议：</b>{html.escape(item.suggestion)}</div>"
                 "</div>",
                 unsafe_allow_html=True,
+            )
+
+    if unmatched_speech:
+        st.info(
+            f"另有 {len(unmatched_speech)} 段语音暂未稳定对应到剧本行。"
+            "它们不计为剧本错误，也不会再显示不存在的‘剧本第—行’。"
+        )
+        with st.expander(f"查看未匹配语音（{len(unmatched_speech)} 段，可忽略）"):
+            st.dataframe(
+                [
+                    {
+                        "开始": _timestamp(item.start_ms),
+                        "结束": _timestamp(item.end_ms),
+                        "ASR 音频证据（简体）": to_simplified_chinese(
+                            item.recognized_text or ""
+                        ),
+                        "说明": item.reason,
+                    }
+                    for item in unmatched_speech
+                    if normalize_dialogue(item.recognized_text or "")
+                ],
+                hide_index=True,
+                **_stretch(st.dataframe),
             )
 
     with st.expander(f"查看完整时间码转写（{len(report.transcript_segments)} 段）"):

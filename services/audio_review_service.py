@@ -674,7 +674,8 @@ def fuse_subtitle_evidence(
     used_observations: set[str] = set()
     rescued_count = 0
     for alignment in alignments:
-        if not alignment.expected_text or alignment.status == DialogueMatchStatus.extra:
+        status_value = getattr(alignment.status, "value", alignment.status)
+        if not alignment.expected_text or status_value == DialogueMatchStatus.extra.value:
             fused.append(alignment)
             continue
         candidates = _subtitle_candidates(alignment, observations)
@@ -719,7 +720,6 @@ def fuse_subtitle_evidence(
             "subtitle_end_ms": subtitle.end_ms,
             "subtitle_similarity": script_equivalence.text_similarity,
         }
-        status_value = getattr(alignment.status, "value", alignment.status)
         if (
             status_value == DialogueMatchStatus.changed.value
             and (script_equivalence.kind or audio_equivalence.kind)
@@ -757,7 +757,34 @@ def fuse_subtitle_evidence(
                 }
             )
         fused.append(alignment.model_copy(update=updates))
-    return fused, rescued_count
+    # OCR 可能在“疑似加词”生成之后才把同时间段的剧本行纠正为一致；
+    # 此时移除重复的未匹配语音，避免同一句同时显示“正确”和“加词”。
+    matched_windows = [
+        (item.start_ms, item.end_ms)
+        for item in fused
+        if getattr(item.status, "value", item.status)
+        == DialogueMatchStatus.matched.value
+        and item.start_ms is not None
+        and item.end_ms is not None
+    ]
+    deduplicated = [
+        item
+        for item in fused
+        if not (
+            getattr(item.status, "value", item.status)
+            == DialogueMatchStatus.extra.value
+            and item.start_ms is not None
+            and item.end_ms is not None
+            and any(
+                _time_overlap_ratio(
+                    item.start_ms, item.end_ms, matched_start, matched_end
+                )
+                >= 0.45
+                for matched_start, matched_end in matched_windows
+            )
+        )
+    ]
+    return deduplicated, rescued_count
 
 
 def _subtitle_candidates(
@@ -940,11 +967,30 @@ def align_dialogues(
             }
         )
 
-    # 如果某个 ASR 片段的大部分字符没有参与任何匹配，将它作为疑似临场加词。
+    matched_windows = [
+        (item.start_ms, item.end_ms)
+        for item in alignments
+        if getattr(item.status, "value", item.status)
+        == DialogueMatchStatus.matched.value
+        and item.start_ms is not None
+        and item.end_ms is not None
+    ]
+
+    # 如果某个有意义的 ASR 片段没有参与任何匹配，将它作为低优先级未匹配语音。
     for segment, (left, right) in zip(transcript_segments, transcript_ranges):
-        segment_length = max(1, right - left)
+        segment_length = right - left
+        if segment_length < 2:
+            continue
+        if any(
+            _time_overlap_ratio(
+                segment.start_ms, segment.end_ms, matched_start, matched_end
+            )
+            >= 0.45
+            for matched_start, matched_end in matched_windows
+        ):
+            continue
         matched = sum(position in matched_actual_positions for position in range(left, right))
-        if segment_length < 2 or matched / segment_length >= 0.45:
+        if matched / segment_length >= 0.45:
             continue
         alignments.append(
             DialogueAlignment(
@@ -954,12 +1000,26 @@ def align_dialogues(
                 start_ms=segment.start_ms,
                 end_ms=segment.end_ms,
                 similarity=matched / segment_length,
-                reason="这段成片语音未能对应到剧本台词，可能是临场加词、环境人声或 ASR 误识别",
-                suggestion="回看对应时间码；若为有效临场改词，请同步更新剧本并保存新版本",
+                reason="这段成片语音暂未稳定对应到剧本行；它不是剧本中的破折号，也不直接计为剧本错误",
+                suggestion="仅在需要核对临场发挥或环境人声时回听；确认无关可忽略",
             )
         )
 
     return alignments, matcher.ratio()
+
+
+def _time_overlap_ratio(
+    start_ms: int,
+    end_ms: int,
+    reference_start_ms: int,
+    reference_end_ms: int,
+) -> float:
+    duration = max(1, end_ms - start_ms)
+    overlap = max(
+        0,
+        min(end_ms, reference_end_ms) - max(start_ms, reference_start_ms),
+    )
+    return overlap / duration
 
 
 def extract_audio_track(video_path: str | Path, wav_path: str | Path) -> AudioQualityMetrics:
