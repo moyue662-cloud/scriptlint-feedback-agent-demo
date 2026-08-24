@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from fractions import Fraction
 import math
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
@@ -18,9 +19,11 @@ from services import audio_review_service as audio_module
 from services.audio_review_service import (
     AudioReviewError,
     AudioReviewService,
+    FasterWhisperTranscriber,
     TranscriptionResult,
     align_dialogues,
     assess_text_equivalence,
+    build_asr_context,
     extract_audio_track,
     extract_script_dialogues,
     extract_subtitle_observations,
@@ -333,6 +336,89 @@ def test_subtitle_does_not_hide_missing_audio():
     assert "字幕不能证明实际收音完整" in fused[0].reason
 
 
+def test_subtitle_rescues_low_confidence_asr_when_speech_overlaps():
+    alignment = DialogueAlignment(
+        id="alignment_garbled_asr",
+        status=DialogueMatchStatus.missing,
+        script_line_number=595,
+        speaker="赵启明",
+        expected_text="政策是文本，文本能检索，检索就能答。",
+        recognized_text="正则是纹本纹本能减锁减锁就能打",
+        start_ms=216890,
+        end_ms=220130,
+        similarity=0.18,
+        reason="音频未稳定识别",
+        suggestion="复核",
+    )
+    subtitle = SubtitleObservation(
+        id="subtitle_exact_script",
+        start_ms=218530,
+        end_ms=220030,
+        frame_number=100,
+        text="政策是文本，文本能检索，检索就能答。",
+        confidence=0.96,
+    )
+
+    fused, rescued = fuse_subtitle_evidence([alignment], [subtitle])
+
+    assert rescued == 1
+    assert fused[0].status == DialogueMatchStatus.matched
+    assert fused[0].resolved_by_subtitle is True
+    assert "同时间段检测到语音" in fused[0].evidence_match_basis
+    assert "不把 ASR 错字计为漏词" in fused[0].reason
+
+
+def test_asr_context_uses_terms_without_copying_full_dialogue():
+    parsed = parse_script_dialogues(
+        "陆衡：政策是文本，文本能检索，检索就能答。\n赵启明：项目暂停。"
+    )
+
+    prompt, hotwords = build_asr_context(parsed, "澄思智能、哲学楼")
+
+    assert "忠实按实际发音转写" in prompt
+    assert "政策是文本，文本能检索" not in prompt
+    assert hotwords is not None
+    for term in ("陆衡", "赵启明", "政策", "文本", "检索", "项目", "澄思智能", "哲学楼"):
+        assert term in hotwords
+
+
+def test_faster_whisper_uses_multi_candidate_chinese_decode_options():
+    captured: dict[str, object] = {}
+
+    class _Model:
+        def transcribe(self, audio_path, **kwargs):
+            captured["audio_path"] = audio_path
+            captured.update(kwargs)
+            return (
+                [
+                    SimpleNamespace(
+                        start=0.0,
+                        end=1.2,
+                        text=" 政策是文本 ",
+                        avg_logprob=-0.1,
+                    )
+                ],
+                SimpleNamespace(language="zh", language_probability=0.99),
+            )
+
+    transcriber = object.__new__(FasterWhisperTranscriber)
+    transcriber.model_name = "base"
+    transcriber._model = _Model()
+
+    result = transcriber.transcribe(
+        "clip.wav",
+        initial_prompt="中文短剧对白",
+        hotwords="陆衡 政策 文本",
+    )
+
+    assert result.segments[0].text == "政策是文本"
+    assert captured["language"] == "zh"
+    assert captured["beam_size"] == 5
+    assert captured["condition_on_previous_text"] is True
+    assert captured["initial_prompt"] == "中文短剧对白"
+    assert captured["hotwords"] == "陆衡 政策 文本"
+
+
 class _FakeSubtitleReader:
     model_name = "fake-ocr"
 
@@ -375,7 +461,7 @@ def test_extract_subtitle_observations_samples_and_deduplicates_video(tmp_path):
 class _FakeTranscriber:
     model_name = "fake-tiny"
 
-    def transcribe(self, _audio_path):
+    def transcribe(self, _audio_path, **_kwargs):
         return TranscriptionResult(
             segments=[_segment(1, "账本在仓库", 200, 1200)],
             language="zh",
@@ -396,7 +482,7 @@ class _StaleTranscriptSegment(BaseModel):
 class _CachedOldTranscriber:
     model_name = "cached-old-tiny"
 
-    def transcribe(self, _audio_path):
+    def transcribe(self, _audio_path, **_kwargs):
         return TranscriptionResult(
             segments=[
                 _StaleTranscriptSegment(

@@ -47,6 +47,7 @@ from services.audio_review_service import (
 CST = timezone(timedelta(hours=8))
 TEAM_ID = "team_scriptlint_demo"
 DEFAULT_PROJECT_ID = "project_my_short_drama"
+APP_BUILD = "audio-review-v4 · 2026-08-24"
 DEMO_SCRIPT = """第3集 内景 灵堂 日
 女主左手缠着厚厚的绷带，却用左手提起沉重的箱子。
 男主左脸有一道新伤。
@@ -294,6 +295,7 @@ def _sidebar(repo: SQLiteRepository) -> None:
             unsafe_allow_html=True,
         )
         st.caption("成片音频、人物一致性、改稿规则记忆与跨版本审计。")
+        st.caption(f"构建版本：{APP_BUILD}")
         st.markdown("<div class='section-label'>当前项目</div>", unsafe_allow_html=True)
         st.markdown(f"**《{html.escape(_project_name())}》**")
         st.caption(f"匿名项目隔离键：{_project_id()}（请勿公开复用）")
@@ -645,6 +647,16 @@ def _clear_audio_result() -> None:
     st.session_state.pop("audio_script_result", None)
 
 
+def _ensure_current_build_state() -> None:
+    """代码升级后丢弃旧会话报告，避免新版页面继续展示旧枚举与旧卡片。"""
+    if st.session_state.get("_scriptlint_build") == APP_BUILD:
+        return
+    _clear_audio_result()
+    st.session_state.pop("audio_review_video", None)
+    st.session_state["audio_model_name"] = "base"
+    st.session_state["_scriptlint_build"] = APP_BUILD
+
+
 def _render_dialogue_preview(script_text: str) -> None:
     if not script_text.strip():
         return
@@ -917,10 +929,25 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
     if video is not None:
         st.video(video.getvalue())
         st.caption(f"已选择：{video.name} · {video.size / 1024 / 1024:.1f}MB")
+    model_labels = {
+        "tiny": "tiny｜最快，仅适合流程演示",
+        "base": "base｜平衡模式（推荐）",
+        "small": "small｜精度优先，首次下载和识别明显更慢",
+    }
     model_name = st.selectbox(
         "语音模型",
-        ["tiny", "base"],
-        format_func=lambda value: "tiny｜最快，适合流程演示" if value == "tiny" else "base｜中文更稳，首次下载与识别更慢",
+        ["tiny", "base", "small"],
+        key="audio_model_name",
+        format_func=lambda value: model_labels[value],
+        on_change=_clear_audio_result,
+    )
+    st.caption("新版采用多候选束搜索；正式复核建议选 small，演示速度优先可选 base。")
+    st.text_input(
+        "识别词表（可选）",
+        key="asr_terms",
+        placeholder="例如：澄思智能、赵启明、哲学楼（逗号分隔）",
+        help="只用于提示人名和专业词，不会把完整剧本台词喂给识别模型。",
+        on_change=_clear_audio_result,
     )
     schema_epoch = _runtime_schema_epoch()
     ocr_ready, ocr_status = _ocr_runtime_probe(schema_epoch)
@@ -977,6 +1004,7 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
                             wav_path=wav_path,
                             script_text=script_text,
                             source_name=video.name,
+                            asr_terms=st.session_state.get("asr_terms", ""),
                             created_at=_now(),
                         )
                         if ocr_startup_warning:
@@ -1223,6 +1251,7 @@ def _about() -> None:
 def main() -> None:
     st.set_page_config(page_title="ScriptLint · 短剧反馈记忆 Agent", page_icon="✦", layout="wide", initial_sidebar_state="expanded")
     _inject_css()
+    _ensure_current_build_state()
     st.session_state.setdefault("script_input", DEMO_SCRIPT)
     st.session_state.setdefault("episode_input", 3)
     st.session_state.setdefault("project_name", "我的短剧项目")

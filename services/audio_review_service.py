@@ -149,7 +149,13 @@ class TextEquivalence:
 class SpeechTranscriber(Protocol):
     model_name: str
 
-    def transcribe(self, audio_path: str | Path) -> TranscriptionResult: ...
+    def transcribe(
+        self,
+        audio_path: str | Path,
+        *,
+        initial_prompt: str | None = None,
+        hotwords: str | None = None,
+    ) -> TranscriptionResult: ...
 
 
 class SubtitleReader(Protocol):
@@ -171,14 +177,32 @@ class FasterWhisperTranscriber:
             ) from exc
         self._model = WhisperModel(model_name, device="cpu", compute_type="int8")
 
-    def transcribe(self, audio_path: str | Path) -> TranscriptionResult:
+    def transcribe(
+        self,
+        audio_path: str | Path,
+        *,
+        initial_prompt: str | None = None,
+        hotwords: str | None = None,
+    ) -> TranscriptionResult:
         try:
             raw_segments, info = self._model.transcribe(
                 str(audio_path),
                 language="zh",
-                beam_size=1,
+                # beam_size=1 对中文同音字和较长台词过于激进。tiny 保持较轻，
+                # base/small 使用完整束搜索，在 CPU Demo 上换取更可靠的转写。
+                beam_size=3 if self.model_name == "tiny" else 5,
+                patience=1.2,
+                temperature=0.0,
                 vad_filter=True,
-                condition_on_previous_text=False,
+                vad_parameters={
+                    "min_silence_duration_ms": 350,
+                    "speech_pad_ms": 250,
+                },
+                condition_on_previous_text=True,
+                initial_prompt=initial_prompt,
+                hotwords=hotwords,
+                no_speech_threshold=0.5,
+                log_prob_threshold=-1.2,
             )
             segments = [
                 TranscriptSegment(
@@ -200,6 +224,56 @@ class FasterWhisperTranscriber:
             language=getattr(info, "language", None),
             language_probability=getattr(info, "language_probability", None),
         )
+
+
+def build_asr_context(
+    parse_result: ScriptDialogueParseResult,
+    extra_terms: str | None = None,
+) -> tuple[str, str | None]:
+    """构造非全文照抄式 ASR 上下文，提升人名和专业词识别但不喂入完整台词。"""
+    terms: list[str] = []
+
+    def add_term(value: str) -> None:
+        normalized = to_simplified_chinese(value).strip(" ，,、。；;：:\t\r\n")
+        if 1 < len(normalized) <= 24 and normalized not in terms:
+            terms.append(normalized)
+
+    for name in parse_result.discovered_characters:
+        add_term(name)
+    for row in parse_result.dialogues:
+        add_term(row.speaker)
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9._+-]{1,23}", row.text):
+            add_term(token)
+
+    # 只抽取容易被同音字误写的领域词，不把完整剧本台词作为提示，避免掩盖现场改词。
+    domain_markers = (
+        "公司",
+        "模型",
+        "系统",
+        "智能",
+        "项目",
+        "政策",
+        "文本",
+        "检索",
+        "算法",
+        "接口",
+        "数据库",
+        "哲学",
+    )
+    dialogue_text = "\n".join(row.text for row in parse_result.dialogues)
+    for marker in domain_markers:
+        if marker in dialogue_text:
+            add_term(marker)
+    for token in re.split(r"[,，、;；\s]+", extra_terms or ""):
+        add_term(token)
+
+    role_text = "、".join(terms[:16]) or "中文短剧角色"
+    prompt = (
+        "这是简体中文短剧对白。请忠实按实际发音转写，不要根据剧本补写或改写。"
+        f"可能出现的人名和专业词：{role_text}。"
+    )
+    hotwords = " ".join(terms[:32]) or None
+    return prompt, hotwords
 
 
 class RapidOcrSubtitleReader:
@@ -743,12 +817,41 @@ def fuse_subtitle_evidence(
             status_value == DialogueMatchStatus.missing.value
             and script_equivalence.kind
         ):
-            updates.update(
-                {
-                    "reason": "画面字幕与剧本一致，但音频中未稳定识别到该句；字幕不能证明实际收音完整",
-                    "suggestion": "回听字幕对应时间码，区分漏录、音量过低与 ASR 未识别",
-                }
+            has_overlapping_speech = (
+                len(normalize_dialogue(alignment.recognized_text or "")) >= 2
+                and alignment.start_ms is not None
+                and alignment.end_ms is not None
+                and _time_overlap_ratio(
+                    alignment.start_ms,
+                    alignment.end_ms,
+                    subtitle.start_ms,
+                    subtitle.end_ms,
+                )
+                >= 0.2
             )
+            if has_overlapping_speech:
+                basis = (
+                    f"画面字幕与剧本{script_equivalence.kind}，"
+                    "同时间段检测到语音（ASR 低置信）"
+                )
+                updates.update(
+                    {
+                        "status": DialogueMatchStatus.matched,
+                        "resolved_by_subtitle": True,
+                        "evidence_match_basis": basis,
+                        "reason": f"{basis}；综合判定台词一致，不把 ASR 错字计为漏词",
+                        "suggestion": "系统已判定一致；关键台词仍可按时间码抽听确认",
+                    }
+                )
+                rescued_count += 1
+                used_observations.add(subtitle.id)
+            else:
+                updates.update(
+                    {
+                        "reason": "画面字幕与剧本一致，但同时间段没有可靠语音证据；字幕不能证明实际收音完整",
+                        "suggestion": "回听字幕对应时间码，区分漏录、音量过低与 ASR 未识别",
+                    }
+                )
         elif status_value == DialogueMatchStatus.changed.value:
             updates.update(
                 {
@@ -1091,11 +1194,18 @@ class AudioReviewService:
         wav_path: str | Path,
         script_text: str,
         source_name: str,
+        asr_terms: str | None = None,
         created_at: datetime | None = None,
     ) -> AudioReviewReport:
         started = time.perf_counter()
         quality = extract_audio_track(video_path, wav_path)
-        transcription = self._transcriber.transcribe(wav_path)
+        parse_result = parse_script_dialogues(script_text)
+        initial_prompt, hotwords = build_asr_context(parse_result, asr_terms)
+        transcription = self._transcriber.transcribe(
+            wav_path,
+            initial_prompt=initial_prompt,
+            hotwords=hotwords,
+        )
         transcript_segments = [
             TranscriptSegment.model_validate(_model_payload(item)).model_copy(
                 update={
@@ -1106,7 +1216,6 @@ class AudioReviewService:
             )
             for item in transcription.segments
         ]
-        parse_result = parse_script_dialogues(script_text)
         script_dialogues = parse_result.dialogues
         alignments, overall_similarity = align_dialogues(
             script_dialogues, transcript_segments
