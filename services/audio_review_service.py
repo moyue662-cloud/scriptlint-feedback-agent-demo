@@ -28,6 +28,8 @@ from schemas.multimodal import (
     IgnoredScriptLine,
     ScriptDialogueParseResult,
     ScriptDialogueLine,
+    SpeakerClusterSummary,
+    SpeakerConsistencyIssue,
     SubtitleObservation,
     TranscriptSegment,
 )
@@ -39,6 +41,10 @@ SUPPORTED_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
 OCR_SAMPLE_INTERVAL_MS = 900
 MAX_OCR_FRAMES = 420
 MAX_ASR_SEGMENT_MS = 7000
+MIN_SPEAKER_SEGMENT_MS = 280
+MAX_SPEAKER_CLUSTERS = 6
+AUTO_SPEAKER_ROLE_THRESHOLD = 0.78
+SPEAKER_CONFLICT_THRESHOLD = 0.82
 
 _NON_DIALOGUE_SECTIONS = {
     "作品信息",
@@ -1355,6 +1361,397 @@ def extract_audio_track(video_path: str | Path, wav_path: str | Path) -> AudioQu
     return _quality_metrics(all_samples, duration_seconds)
 
 
+@dataclass(frozen=True)
+class SpeakerClusteringResult:
+    segments: list[TranscriptSegment]
+    clusters: list[SpeakerClusterSummary]
+    method: str
+    warnings: list[str]
+
+
+@lru_cache(maxsize=8)
+def _mel_filterbank(sample_rate: int, n_fft: int, n_mels: int = 24) -> np.ndarray:
+    """构建不依赖 librosa 的轻量 Mel 滤波器组。"""
+
+    def hz_to_mel(value: float) -> float:
+        return 2595.0 * math.log10(1.0 + value / 700.0)
+
+    def mel_to_hz(value: float) -> float:
+        return 700.0 * (10 ** (value / 2595.0) - 1.0)
+
+    mel_points = np.linspace(
+        hz_to_mel(70.0),
+        hz_to_mel(min(7600.0, sample_rate / 2)),
+        n_mels + 2,
+    )
+    bins = np.floor((n_fft + 1) * np.array([mel_to_hz(v) for v in mel_points]) / sample_rate)
+    bins = np.clip(bins.astype(int), 0, n_fft // 2)
+    filters = np.zeros((n_mels, n_fft // 2 + 1), dtype=np.float32)
+    for index in range(n_mels):
+        left, center, right = bins[index : index + 3]
+        if center <= left:
+            center = min(left + 1, n_fft // 2)
+        if right <= center:
+            right = min(center + 1, n_fft // 2)
+        if center > left:
+            filters[index, left:center] = np.linspace(0, 1, center - left, endpoint=False)
+        if right > center:
+            filters[index, center:right] = np.linspace(1, 0, right - center, endpoint=False)
+    return filters
+
+
+@lru_cache(maxsize=4)
+def _dct_basis(n_mels: int = 24, n_coefficients: int = 12) -> np.ndarray:
+    positions = np.arange(n_mels, dtype=np.float32) + 0.5
+    coefficients = np.arange(n_coefficients, dtype=np.float32)[:, None]
+    return np.cos(math.pi * coefficients * positions / n_mels).astype(np.float32)
+
+
+def _speaker_features(
+    samples: np.ndarray,
+    sample_rate: int,
+    start_ms: int,
+    end_ms: int,
+) -> np.ndarray | None:
+    start = max(0, round(start_ms * sample_rate / 1000))
+    end = min(samples.size, round(end_ms * sample_rate / 1000))
+    clip = samples[start:end].astype(np.float32)
+    if clip.size < round(sample_rate * MIN_SPEAKER_SEGMENT_MS / 1000):
+        return None
+    clip /= max(32768.0, float(np.max(np.abs(clip))) + 1e-6)
+    clip = np.append(clip[0], clip[1:] - 0.97 * clip[:-1])
+    frame_length = round(sample_rate * 0.025)
+    hop = round(sample_rate * 0.010)
+    frame_count = 1 + max(0, (clip.size - frame_length) // hop)
+    if frame_count < 3:
+        return None
+    frames = np.stack(
+        [clip[index * hop : index * hop + frame_length] for index in range(frame_count)]
+    )
+    frame_rms = np.sqrt(np.mean(frames * frames, axis=1) + 1e-10)
+    threshold = max(float(np.percentile(frame_rms, 30)), 0.002)
+    voiced = frames[frame_rms >= threshold]
+    if voiced.shape[0] < 3:
+        return None
+    windowed = voiced * np.hanning(frame_length).astype(np.float32)
+    power = np.abs(np.fft.rfft(windowed, axis=1)) ** 2
+    mel_energy = power @ _mel_filterbank(sample_rate, frame_length).T
+    log_mel = np.log(mel_energy + 1e-8)
+    mfcc = log_mel @ _dct_basis().T
+    frequencies = np.fft.rfftfreq(frame_length, 1 / sample_rate)
+    spectral_total = np.sum(power, axis=1) + 1e-8
+    centroid = np.sum(power * frequencies, axis=1) / spectral_total
+    low_voice = power[:, (frequencies >= 70) & (frequencies <= 520)]
+    low_freqs = frequencies[(frequencies >= 70) & (frequencies <= 520)]
+    dominant = low_freqs[np.argmax(low_voice, axis=1)] if low_freqs.size else centroid
+    signs = np.signbit(voiced)
+    zcr = np.mean(signs[:, 1:] != signs[:, :-1], axis=1)
+    return np.concatenate(
+        [
+            np.mean(mfcc[:, 1:11], axis=0),
+            np.std(mfcc[:, 1:7], axis=0),
+            [
+                float(np.median(centroid) / (sample_rate / 2)),
+                float(np.mean(zcr)),
+                float(np.median(dominant) / 520.0),
+            ],
+        ]
+    ).astype(np.float32)
+
+
+def _deterministic_kmeans(
+    data: np.ndarray,
+    cluster_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if cluster_count <= 1:
+        center = np.mean(data, axis=0, keepdims=True)
+        distances = np.linalg.norm(data - center, axis=1)
+        return np.zeros(data.shape[0], dtype=int), center, distances
+    centers = [data[np.argmax(np.linalg.norm(data - np.mean(data, axis=0), axis=1))]]
+    while len(centers) < cluster_count:
+        distance_matrix = np.stack(
+            [np.linalg.norm(data - center, axis=1) for center in centers], axis=1
+        )
+        centers.append(data[np.argmax(np.min(distance_matrix, axis=1))])
+    centers_array = np.stack(centers)
+    labels = np.zeros(data.shape[0], dtype=int)
+    for _ in range(40):
+        distances = np.linalg.norm(data[:, None, :] - centers_array[None, :, :], axis=2)
+        next_labels = np.argmin(distances, axis=1)
+        next_centers = centers_array.copy()
+        for cluster in range(cluster_count):
+            members = data[next_labels == cluster]
+            if members.size:
+                next_centers[cluster] = np.mean(members, axis=0)
+        if np.array_equal(next_labels, labels) and np.allclose(next_centers, centers_array):
+            labels = next_labels
+            centers_array = next_centers
+            break
+        labels = next_labels
+        centers_array = next_centers
+    own_distance = np.linalg.norm(data - centers_array[labels], axis=1)
+    return labels, centers_array, own_distance
+
+
+def _silhouette_score(data: np.ndarray, labels: np.ndarray) -> float:
+    unique = np.unique(labels)
+    if unique.size < 2 or data.shape[0] <= unique.size:
+        return 0.0
+    pairwise = np.linalg.norm(data[:, None, :] - data[None, :, :], axis=2)
+    scores: list[float] = []
+    for index, label in enumerate(labels):
+        same = labels == label
+        same[index] = False
+        a = float(np.mean(pairwise[index, same])) if np.any(same) else 0.0
+        b = min(
+            float(np.mean(pairwise[index, labels == other]))
+            for other in unique
+            if other != label
+        )
+        scores.append((b - a) / max(a, b, 1e-8))
+    return float(np.mean(scores))
+
+
+def cluster_transcript_speakers(
+    wav_path: str | Path,
+    segments: list[TranscriptSegment],
+    *,
+    speaker_count: int = 0,
+) -> SpeakerClusteringResult:
+    """按 ASR 时间段做轻量声学聚类；结果只代表相似声音组，不代表身份。"""
+    warnings: list[str] = []
+    try:
+        with wave.open(str(wav_path), "rb") as source:
+            sample_rate = source.getframerate()
+            channels = source.getnchannels()
+            width = source.getsampwidth()
+            raw = source.readframes(source.getnframes())
+    except (OSError, wave.Error) as exc:
+        raise AudioReviewError(f"无法读取说话人分组所需音轨：{exc}") from exc
+    if width != 2 or channels != 1:
+        raise AudioReviewError("说话人分组需要 16-bit 单声道 WAV。")
+    samples = np.frombuffer(raw, dtype="<i2")
+    feature_rows: list[np.ndarray] = []
+    eligible_indexes: list[int] = []
+    for index, segment in enumerate(segments):
+        feature = _speaker_features(
+            samples,
+            sample_rate,
+            segment.start_ms,
+            segment.end_ms,
+        )
+        if feature is not None and np.all(np.isfinite(feature)):
+            feature_rows.append(feature)
+            eligible_indexes.append(index)
+    if len(feature_rows) < 2:
+        warnings.append("可用语音片段不足，未执行自动声学分组。")
+        return SpeakerClusteringResult(
+            segments=segments,
+            clusters=[],
+            method="lightweight-mfcc-v1",
+            warnings=warnings,
+        )
+    raw_features = np.stack(feature_rows)
+    median = np.median(raw_features, axis=0)
+    scale = np.std(raw_features, axis=0)
+    scale[scale < 1e-4] = 1.0
+    data = np.clip((raw_features - median) / scale, -5.0, 5.0)
+    maximum = min(MAX_SPEAKER_CLUSTERS, len(feature_rows))
+    requested = max(0, min(int(speaker_count or 0), maximum))
+    if requested:
+        cluster_count = requested
+    else:
+        candidate_max = min(4, maximum, max(2, len(feature_rows) // 4))
+        candidates: list[tuple[float, int, np.ndarray, np.ndarray, np.ndarray]] = []
+        for count in range(2, candidate_max + 1):
+            labels, centers, distances = _deterministic_kmeans(data, count)
+            score = _silhouette_score(data, labels) - 0.025 * max(0, count - 2)
+            candidates.append((score, count, labels, centers, distances))
+        best = max(candidates, key=lambda item: item[0]) if candidates else None
+        cluster_count = best[1] if best and best[0] >= 0.16 else 1
+        if cluster_count == 1:
+            warnings.append("声学差异不足以稳定拆分多人，暂归为 1 个声音组。")
+    labels, centers, own_distances = _deterministic_kmeans(data, cluster_count)
+    if cluster_count > 1:
+        pitch_order = sorted(
+            range(cluster_count),
+            key=lambda label: float(np.median(raw_features[labels == label, -1])),
+        )
+        remap = {old: new for new, old in enumerate(pitch_order)}
+        labels = np.array([remap[int(label)] for label in labels], dtype=int)
+        centers = np.stack([centers[old] for old in pitch_order])
+    distance_matrix = np.linalg.norm(data[:, None, :] - centers[None, :, :], axis=2)
+    updated = list(segments)
+    for row_index, segment_index in enumerate(eligible_indexes):
+        label = int(labels[row_index])
+        ordered = np.sort(distance_matrix[row_index])
+        if cluster_count == 1:
+            confidence = 0.62
+        else:
+            confidence = 0.5 + 0.5 * max(
+                0.0,
+                min(1.0, (ordered[1] - ordered[0]) / max(ordered[1], 1e-8)),
+            )
+        updated[segment_index] = updated[segment_index].model_copy(
+            update={
+                "speaker_tag": f"声学组{chr(65 + label)}",
+                "speaker_confidence": float(confidence),
+                "speaker_auto": True,
+            }
+        )
+    clusters = _summarize_speaker_clusters(updated, {})
+    return SpeakerClusteringResult(
+        segments=updated,
+        clusters=clusters,
+        method="lightweight-mfcc-v1",
+        warnings=warnings,
+    )
+
+
+def _alignment_segments(
+    alignment: DialogueAlignment,
+    segments: list[TranscriptSegment],
+) -> list[tuple[TranscriptSegment, float]]:
+    if alignment.start_ms is None or alignment.end_ms is None:
+        return []
+    matches: list[tuple[TranscriptSegment, float]] = []
+    for segment in segments:
+        overlap = max(
+            0,
+            min(alignment.end_ms, segment.end_ms)
+            - max(alignment.start_ms, segment.start_ms),
+        )
+        if overlap:
+            matches.append((segment, overlap / max(1, segment.end_ms - segment.start_ms)))
+    return matches
+
+
+def _summarize_speaker_clusters(
+    segments: list[TranscriptSegment],
+    role_votes: dict[str, dict[str, float]],
+) -> list[SpeakerClusterSummary]:
+    summaries: list[SpeakerClusterSummary] = []
+    tags = sorted({item.speaker_tag for item in segments if item.speaker_tag})
+    for tag in tags:
+        members = [item for item in segments if item.speaker_tag == tag]
+        votes = dict(role_votes.get(tag, {}))
+        for item in members:
+            if item.speaker_role and not item.speaker_auto:
+                votes[item.speaker_role] = votes.get(item.speaker_role, 0.0) + 5.0
+        ordered = sorted(votes.items(), key=lambda item: (-item[1], item[0]))
+        total = sum(votes.values())
+        mapped_role = ordered[0][0] if ordered and total > 0 else None
+        role_confidence = ordered[0][1] / total if ordered and total > 0 else None
+        summaries.append(
+            SpeakerClusterSummary(
+                tag=tag,
+                segment_count=len(members),
+                duration_ms=sum(max(0, item.end_ms - item.start_ms) for item in members),
+                confidence=float(
+                    np.mean(
+                        [item.speaker_confidence for item in members if item.speaker_confidence is not None]
+                        or [0.0]
+                    )
+                ),
+                mapped_role=mapped_role,
+                role_confidence=role_confidence,
+                role_votes={key: round(value, 3) for key, value in ordered},
+                sample_texts=[item.text for item in members[:3]],
+            )
+        )
+    return summaries
+
+
+def infer_speaker_roles(
+    segments: list[TranscriptSegment],
+    alignments: list[DialogueAlignment],
+) -> tuple[list[TranscriptSegment], list[SpeakerClusterSummary], list[SpeakerConsistencyIssue]]:
+    """用剧本角色作弱监督，为声学组推荐角色并标出组内少数冲突。"""
+    votes: dict[str, dict[str, float]] = {}
+    usable_statuses = {DialogueMatchStatus.matched, DialogueMatchStatus.changed}
+    for alignment in alignments:
+        if not alignment.speaker or alignment.status not in usable_statuses:
+            continue
+        for segment, overlap in _alignment_segments(alignment, segments):
+            if not segment.speaker_tag:
+                continue
+            weight = max(0.15, alignment.similarity) * overlap
+            tag_votes = votes.setdefault(segment.speaker_tag, {})
+            tag_votes[alignment.speaker] = tag_votes.get(alignment.speaker, 0.0) + weight
+    summaries = _summarize_speaker_clusters(segments, votes)
+    summary_by_tag = {item.tag: item for item in summaries}
+    updated: list[TranscriptSegment] = []
+    for segment in segments:
+        summary = summary_by_tag.get(segment.speaker_tag or "")
+        can_auto_map = bool(
+            summary
+            and summary.mapped_role
+            and summary.role_confidence is not None
+            and summary.role_confidence >= AUTO_SPEAKER_ROLE_THRESHOLD
+            and sum(summary.role_votes.values()) >= 1.1
+        )
+        if can_auto_map and (not segment.speaker_role or segment.speaker_auto):
+            segment = segment.model_copy(
+                update={
+                    "speaker_role": summary.mapped_role,
+                    "speaker_role_confidence": summary.role_confidence,
+                    "speaker_auto": True,
+                }
+            )
+        elif segment.speaker_auto and segment.speaker_role:
+            segment = segment.model_copy(
+                update={
+                    "speaker_role": None,
+                    "speaker_role_confidence": None,
+                }
+            )
+        updated.append(segment)
+    summaries = _summarize_speaker_clusters(updated, votes)
+    summary_by_tag = {item.tag: item for item in summaries}
+    issues: list[SpeakerConsistencyIssue] = []
+    seen: set[tuple[str, str]] = set()
+    for alignment in alignments:
+        if not alignment.speaker or alignment.status not in usable_statuses:
+            continue
+        for segment, overlap in _alignment_segments(alignment, updated):
+            summary = summary_by_tag.get(segment.speaker_tag or "")
+            if not summary or not summary.mapped_role or summary.mapped_role == alignment.speaker:
+                continue
+            if (
+                (summary.role_confidence or 0.0) < SPEAKER_CONFLICT_THRESHOLD
+                or (segment.speaker_confidence or 0.0) < 0.72
+                or alignment.similarity < 0.85
+            ):
+                continue
+            confidence = min(
+                summary.role_confidence or 0.0,
+                segment.speaker_confidence or 0.0,
+                max(0.0, alignment.similarity),
+            )
+            key = (segment.id, alignment.speaker)
+            if overlap < 0.35 or key in seen:
+                continue
+            seen.add(key)
+            issues.append(
+                SpeakerConsistencyIssue(
+                    id=f"speaker_issue_{len(issues) + 1:04d}",
+                    segment_id=segment.id,
+                    speaker_tag=segment.speaker_tag or "未分组",
+                    mapped_role=summary.mapped_role,
+                    expected_role=alignment.speaker,
+                    start_ms=segment.start_ms,
+                    end_ms=segment.end_ms,
+                    text=segment.text,
+                    confidence=confidence,
+                    reason=(
+                        f"{segment.speaker_tag} 的多数台词更像角色“{summary.mapped_role}”，"
+                        f"但本段剧本标注为“{alignment.speaker}”"
+                    ),
+                )
+            )
+    return updated, summaries, issues
+
+
 class AudioReviewService:
     def __init__(
         self,
@@ -1374,6 +1771,8 @@ class AudioReviewService:
         asr_terms: str | None = None,
         subtitle_observations: list[SubtitleObservation] | None = None,
         subtitle_source_name: str | None = None,
+        enable_speaker_clustering: bool = False,
+        speaker_count: int = 0,
         created_at: datetime | None = None,
     ) -> AudioReviewReport:
         started = time.perf_counter()
@@ -1395,6 +1794,20 @@ class AudioReviewService:
             )
             for item in transcription.segments
         ]
+        speaker_clusters: list[SpeakerClusterSummary] = []
+        speaker_issues: list[SpeakerConsistencyIssue] = []
+        speaker_method: str | None = None
+        speaker_warnings: list[str] = []
+        if enable_speaker_clustering:
+            clustering = cluster_transcript_speakers(
+                wav_path,
+                transcript_segments,
+                speaker_count=speaker_count,
+            )
+            transcript_segments = clustering.segments
+            speaker_clusters = clustering.clusters
+            speaker_method = clustering.method
+            speaker_warnings = clustering.warnings
         script_dialogues = parse_result.dialogues
         alignments, overall_similarity = align_dialogues(
             script_dialogues, transcript_segments
@@ -1429,6 +1842,11 @@ class AudioReviewService:
                 )
             except AudioReviewError as exc:
                 ocr_warnings.append(str(exc))
+        if speaker_clusters:
+            transcript_segments, speaker_clusters, speaker_issues = infer_speaker_roles(
+                transcript_segments,
+                alignments,
+            )
         counts = {
             status: sum(item.status == status for item in alignments)
             for status in DialogueMatchStatus
@@ -1466,7 +1884,15 @@ class AudioReviewService:
             ocr_warnings=ocr_warnings,
             subtitle_source_name=subtitle_source_name,
             manual_revision_count=0,
-            speaker_mapping_count=0,
+            speaker_mapping_count=sum(
+                bool(item.speaker_role) for item in transcript_segments
+            ),
+            speaker_clusters=[_model_payload(item) for item in speaker_clusters],
+            speaker_consistency_issues=[
+                _model_payload(item) for item in speaker_issues
+            ],
+            speaker_clustering_method=speaker_method,
+            speaker_clustering_warnings=speaker_warnings,
             alignments=[_model_payload(item) for item in alignments],
             overall_similarity=overall_similarity,
             matched_count=counts[DialogueMatchStatus.matched],
@@ -1531,6 +1957,10 @@ def revise_audio_report(
             report.subtitle_observations,
             revised_segments,
         )
+    revised_segments, speaker_clusters, speaker_issues = infer_speaker_roles(
+        revised_segments,
+        alignments,
+    )
     counts = {
         status: sum(item.status == status for item in alignments)
         for status in DialogueMatchStatus
@@ -1556,6 +1986,10 @@ def revise_audio_report(
             "speaker_mapping_count": sum(
                 bool(item.speaker_role) for item in revised_segments
             ),
+            "speaker_clusters": [_model_payload(item) for item in speaker_clusters],
+            "speaker_consistency_issues": [
+                _model_payload(item) for item in speaker_issues
+            ],
             "elapsed_ms": report.elapsed_ms + (time.perf_counter() - started) * 1000,
         }
     )

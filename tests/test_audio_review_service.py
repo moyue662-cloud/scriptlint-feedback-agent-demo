@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 from fractions import Fraction
 import math
 from types import SimpleNamespace
+import wave
 
+import numpy as np
 import pytest
 from pydantic import BaseModel
 
@@ -24,10 +26,12 @@ from services.audio_review_service import (
     align_dialogues,
     assess_text_equivalence,
     build_asr_context,
+    cluster_transcript_speakers,
     extract_audio_track,
     extract_script_dialogues,
     extract_subtitle_observations,
     fuse_subtitle_evidence,
+    infer_speaker_roles,
     normalize_dialogue,
     parse_script_dialogues,
     parse_subtitle_text,
@@ -105,6 +109,87 @@ def test_export_revised_transcript_as_srt_with_role():
 
     assert "00:00:01,200 --> 00:00:02,800" in value
     assert "林夏：账本在仓库" in value
+
+
+def test_lightweight_speaker_clustering_separates_two_acoustic_groups(tmp_path):
+    sample_rate = 16000
+    segment_seconds = 0.75
+    samples_per_segment = round(sample_rate * segment_seconds)
+    timeline = np.arange(samples_per_segment, dtype=np.float32) / sample_rate
+    chunks: list[np.ndarray] = []
+    segments: list[TranscriptSegment] = []
+    for index in range(8):
+        frequency = 175 if index % 2 == 0 else 365
+        signal = (
+            np.sin(2 * math.pi * frequency * timeline)
+            + 0.35 * np.sin(2 * math.pi * frequency * 2 * timeline)
+        )
+        chunks.append((signal * 0.22 * 32767).astype(np.int16))
+        segments.append(
+            _segment(
+                index + 1,
+                f"测试台词{index + 1}",
+                round(index * segment_seconds * 1000),
+                round((index + 1) * segment_seconds * 1000),
+            )
+        )
+    wav_path = tmp_path / "two-speakers.wav"
+    with wave.open(str(wav_path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(np.concatenate(chunks).tobytes())
+
+    result = cluster_transcript_speakers(wav_path, segments, speaker_count=2)
+
+    even_tags = {result.segments[index].speaker_tag for index in range(0, 8, 2)}
+    odd_tags = {result.segments[index].speaker_tag for index in range(1, 8, 2)}
+    assert len(result.clusters) == 2
+    assert len(even_tags) == 1
+    assert len(odd_tags) == 1
+    assert even_tags != odd_tags
+    assert all(item.speaker_confidence is not None for item in result.segments)
+
+
+def test_script_roles_weakly_supervise_clusters_and_flag_minority_conflict():
+    specs = [
+        ("声学组A", "林夏", "账本在仓库"),
+        ("声学组A", "林夏", "现在就出发"),
+        ("声学组A", "林夏", "先检查门锁"),
+        ("声学组A", "林夏", "灯还亮着"),
+        ("声学组A", "林夏", "钥匙在桌上"),
+        ("声学组A", "林夏", "不要碰箱子"),
+        ("声学组A", "周远", "门已经关上"),
+        ("声学组B", "周远", "我来处理"),
+        ("声学组B", "周远", "先别报警"),
+        ("声学组B", "周远", "把灯打开"),
+    ]
+    segments = [
+        TranscriptSegment(
+            id=f"role_segment_{index}",
+            start_ms=index * 1000,
+            end_ms=index * 1000 + 800,
+            text=text,
+            confidence=0.95,
+            speaker_tag=tag,
+            speaker_confidence=0.9,
+            speaker_auto=True,
+        )
+        for index, (tag, _role, text) in enumerate(specs)
+    ]
+    script = "\n".join(f"{role}：{text}。" for _tag, role, text in specs)
+    alignments, _ = align_dialogues(extract_script_dialogues(script), segments)
+
+    mapped, summaries, issues = infer_speaker_roles(segments, alignments)
+
+    summary_by_tag = {item.tag: item for item in summaries}
+    assert summary_by_tag["声学组A"].mapped_role == "林夏"
+    assert summary_by_tag["声学组B"].mapped_role == "周远"
+    assert mapped[0].speaker_role == "林夏"
+    assert mapped[-1].speaker_role == "周远"
+    assert [(item.segment_id, item.expected_role, item.mapped_role) for item in issues] == [
+        ("role_segment_6", "周远", "林夏")
+    ]
 
 
 def test_markdown_metadata_title_and_character_background_are_not_dialogue():
@@ -681,6 +766,21 @@ class _CachedOldTranscriber:
         )
 
 
+class _TwoVoiceTranscriber:
+    model_name = "fake-two-voices"
+
+    def transcribe(self, _audio_path, **_kwargs):
+        texts = ["账本在仓库", "我现在就去", "门已经关上", "先别报警"]
+        return TranscriptionResult(
+            segments=[
+                _segment(index + 1, text, index * 800, (index + 1) * 800)
+                for index, text in enumerate(texts)
+            ],
+            language="zh",
+            language_probability=0.99,
+        )
+
+
 def test_review_video_builds_report_with_hash_and_quality(monkeypatch, tmp_path):
     video_path = tmp_path / "clip.mp4"
     video_path.write_bytes(b"not-a-real-video")
@@ -711,6 +811,54 @@ def test_review_video_builds_report_with_hash_and_quality(monkeypatch, tmp_path)
     assert report.ignored_script_lines[0].label == "类型"
     assert len(report.content_hash) == 64
     assert len(report.script_hash) == 64
+
+
+def test_review_video_reports_speaker_clusters_and_role_recommendations(
+    monkeypatch, tmp_path
+):
+    video_path = tmp_path / "speaker-review.mp4"
+    video_path.write_bytes(b"not-a-real-video")
+    wav_path = tmp_path / "speaker-review.wav"
+    sample_rate = 16000
+    segment_samples = round(sample_rate * 0.8)
+    timeline = np.arange(segment_samples, dtype=np.float32) / sample_rate
+    chunks = []
+    for frequency in (180, 360, 180, 360):
+        signal = np.sin(2 * math.pi * frequency * timeline)
+        chunks.append((signal * 0.2 * 32767).astype(np.int16))
+    with wave.open(str(wav_path), "wb") as output:
+        output.setnchannels(1)
+        output.setsampwidth(2)
+        output.setframerate(sample_rate)
+        output.writeframes(np.concatenate(chunks).tobytes())
+    quality = AudioQualityMetrics(
+        duration_ms=3200,
+        sample_rate=sample_rate,
+        channels=1,
+        rms_dbfs=-18,
+        peak_dbfs=-2,
+        clipping_ratio=0,
+        silence_ratio=0.1,
+    )
+    monkeypatch.setattr(audio_module, "extract_audio_track", lambda *_: quality)
+
+    report = AudioReviewService(_TwoVoiceTranscriber()).review_video(
+        video_path=video_path,
+        wav_path=wav_path,
+        script_text=(
+            "林夏：账本在仓库。\n周远：我现在就去。\n"
+            "林夏：门已经关上。\n周远：先别报警。"
+        ),
+        source_name="speaker-review.mp4",
+        enable_speaker_clustering=True,
+        speaker_count=2,
+    )
+
+    assert len(report.speaker_clusters) == 2
+    assert {item.mapped_role for item in report.speaker_clusters} == {"林夏", "周远"}
+    assert report.speaker_mapping_count == 4
+    assert report.speaker_consistency_issues == []
+    assert all(item.speaker_auto for item in report.transcript_segments)
 
 
 def test_imported_subtitle_skips_ocr_and_can_rescue_asr(monkeypatch, tmp_path):

@@ -39,6 +39,7 @@ from schemas.scriptlint import (
 from services.scriptlint_agent import ScriptLintAgent
 from services.script_validation_service import ScriptValidationService
 from services.audio_review_service import (
+    AUTO_SPEAKER_ROLE_THRESHOLD,
     AudioReviewError,
     AudioReviewService,
     FasterWhisperTranscriber,
@@ -57,7 +58,7 @@ from services.visual_review_service import analyze_visual_track
 CST = timezone(timedelta(hours=8))
 TEAM_ID = "team_scriptlint_demo"
 DEFAULT_PROJECT_ID = "project_my_short_drama"
-APP_BUILD = "multimodal-review-workbench-v1 · 2026-08-25"
+APP_BUILD = "multimodal-speaker-stage-b-v1 · 2026-08-25"
 DEMO_SCRIPT = """第3集 内景 灵堂 日
 女主左手缠着厚厚的绷带，却用左手提起沉重的箱子。
 男主左脸有一道新伤。
@@ -346,8 +347,8 @@ def _sidebar(repo: SQLiteRepository) -> None:
         st.markdown("<div style='font-size:12px;line-height:1.9;color:#bdc3d1;'>"
                     "<span style='color:#60d6b1'>●</span> 本地 SQLite<br>"
                     "<span style='color:#60d6b1'>●</span> 六类文本审计<br>"
-                    "<span style='color:#60d6b1'>●</span> 音频·字幕·人工角色·画面时间线</div>", unsafe_allow_html=True)
-        st.caption("已支持字幕文件、人工修订与角色映射；自动声纹和人物视觉语义仍属后续阶段。")
+                    "<span style='color:#60d6b1'>●</span> 音频·字幕·声学分组·画面时间线</div>", unsafe_allow_html=True)
+        st.caption("已支持轻量说话人分组与角色弱监督；身份级声纹和人物视觉语义仍属后续阶段。")
 
 
 def _header() -> None:
@@ -356,7 +357,7 @@ def _header() -> None:
         '<h1>从剧本到成片，问题都有证据。</h1>'
         '<p>上传成片后提取音轨、生成时间码转写并与剧本台词对齐；同时检查人物动作、外观、'
         '知情边界与道具连续性，把编导纠正沉淀为后续版本可复用的项目规则。</p></div>'
-        '<div class="mode-pill"><span class="mode-dot"></span>多模态审片 · Review Workbench</div></div>',
+        '<div class="mode-pill"><span class="mode-dot"></span>多模态审片 · Speaker Stage B</div></div>',
         unsafe_allow_html=True,
     )
     stage = st.session_state.get("demo_stage", 1)
@@ -754,7 +755,7 @@ def _render_audio_report(report: AudioReviewReport) -> None:
         st.success(revision_notice)
     if report.manual_revision_count or report.speaker_mapping_count:
         st.info(
-            f"人工工作台已应用：修订 {report.manual_revision_count} 段转写，"
+            f"审片工作台已应用：修订 {report.manual_revision_count} 段转写，"
             f"映射 {report.speaker_mapping_count} 段角色；当前结论已重新计算。"
         )
 
@@ -766,6 +767,8 @@ def _render_audio_report(report: AudioReviewReport) -> None:
 
     for warning in report.ocr_warnings:
         st.warning(f"字幕 OCR 提示：{warning}；本轮已保留纯音频审片结果。")
+    for warning in report.speaker_clustering_warnings:
+        st.warning(f"说话人分组提示：{warning}")
     if report.ocr_model_name and not report.ocr_warnings:
         if report.subtitle_source_name:
             st.info(
@@ -946,6 +949,7 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                 hide_index=True,
                 **_stretch(st.dataframe),
             )
+    _render_speaker_workbench(report)
     _render_transcript_workbench(report)
     if report.ignored_script_lines:
         with st.expander(f"本轮未参与音频对齐的说明/元数据（{len(report.ignored_script_lines)} 行）"):
@@ -969,8 +973,133 @@ def _render_audio_report(report: AudioReviewReport) -> None:
     )
     st.info(
         "重要边界：字幕文件/OCR 只能提供画面文字，不等于理解人物动作或确认实际发音；"
-        "当前角色映射由编导人工确认，尚未自动识别声纹。所有异常必须回看时间码确认。"
+        "当前说话人能力是轻量声学相似分组，不是身份级声纹识别；自动角色推荐来自剧本弱监督，"
+        "所有角色冲突必须由编导回看时间码确认。"
     )
+
+
+def _render_speaker_workbench(report: AudioReviewReport) -> None:
+    if not report.speaker_clustering_method:
+        return
+    st.markdown("<div class='section-label'>说话人声学分组 · 阶段 B</div>", unsafe_allow_html=True)
+    if not report.speaker_clusters:
+        st.caption("本轮没有足够的有效语音片段形成稳定声学组。")
+        return
+    c1, c2, c3 = st.columns(3)
+    c1.metric("自动声学组", len(report.speaker_clusters))
+    c2.metric(
+        "高置信角色",
+        sum(
+            bool(item.mapped_role)
+            and (item.role_confidence or 0) >= AUTO_SPEAKER_ROLE_THRESHOLD
+            for item in report.speaker_clusters
+        ),
+    )
+    c3.metric("待复核角色冲突", len(report.speaker_consistency_issues))
+    st.caption(
+        "系统按音色/频谱相似性给语音分组，再根据该组多数剧本台词推荐角色。"
+        "它能定位‘疑似由另一类声音说出’的片段，但不能证明现实人物身份。"
+    )
+    st.dataframe(
+        [
+            {
+                "声音组": item.tag,
+                "语音段数": item.segment_count,
+                "总时长": f"{item.duration_ms / 1000:.1f}s",
+                "分组置信度": f"{item.confidence:.0%}",
+                "候选角色": item.mapped_role or "待映射",
+                "角色置信度": (
+                    "—" if item.role_confidence is None else f"{item.role_confidence:.0%}"
+                ),
+                "示例台词": " / ".join(item.sample_texts[:2]),
+            }
+            for item in report.speaker_clusters
+        ],
+        hide_index=True,
+        **_stretch(st.dataframe),
+    )
+    if report.speaker_consistency_issues:
+        st.warning(
+            f"发现 {len(report.speaker_consistency_issues)} 段声音组与剧本角色多数映射不一致。"
+            "这只是复核线索，可能由一人配多角、噪声或分组误差造成。"
+        )
+        with st.expander("查看疑似台词归属冲突"):
+            for issue in report.speaker_consistency_issues:
+                left, right = st.columns([1, 4])
+                with left:
+                    st.button(
+                        f"▶ {_timestamp(issue.start_ms)}",
+                        key=f"seek_speaker_{report.content_hash[:10]}_{issue.id}",
+                        on_click=_set_review_start,
+                        args=(issue.start_ms,),
+                    )
+                with right:
+                    st.caption(
+                        f"{issue.reason} · 置信度 {issue.confidence:.0%} · “{issue.text}”"
+                    )
+    roles = sorted(
+        {
+            item.speaker
+            for item in report.script_dialogues
+            if item.speaker
+        }
+    )
+    with st.expander("确认声音组对应角色"):
+        st.caption(
+            "每个声音组只需确认一次，系统会把映射应用到该组所有语音段并重新检查台词归属。"
+            "低于 78% 的候选不会自动写入角色。"
+        )
+        selections: dict[str, str] = {}
+        for cluster in report.speaker_clusters:
+            options = ["未映射", *roles]
+            default = (
+                options.index(cluster.mapped_role)
+                if cluster.mapped_role in options
+                else 0
+            )
+            selections[cluster.tag] = st.selectbox(
+                cluster.tag,
+                options,
+                index=default,
+                key=f"cluster_role_{report.content_hash[:10]}_{cluster.tag}",
+                help="选择后点击下方按钮；不会重新运行 ASR。",
+            )
+        if st.button(
+            "应用声音组—角色映射",
+            key=f"apply_cluster_roles_{report.content_hash[:12]}",
+            type="primary",
+        ):
+            mapped_segments = [
+                segment.model_copy(
+                    update={
+                        "speaker_role": (
+                            None
+                            if selections.get(segment.speaker_tag or "") == "未映射"
+                            else selections.get(segment.speaker_tag or "")
+                        ),
+                        "speaker_role_confidence": (
+                            None
+                            if selections.get(segment.speaker_tag or "") == "未映射"
+                            else 1.0
+                        ),
+                        "speaker_auto": False,
+                    }
+                )
+                for segment in report.transcript_segments
+            ]
+            try:
+                revised = revise_audio_report(
+                    report,
+                    script_text=st.session_state.get("script_input", ""),
+                    transcript_segments=mapped_segments,
+                )
+                st.session_state["audio_review_report"] = revised
+                st.session_state["audio_revision_notice"] = (
+                    "声音组—角色映射已确认，台词归属冲突已重新计算。"
+                )
+                st.rerun()
+            except AudioReviewError as exc:
+                st.error(str(exc))
 
 
 def _render_transcript_workbench(report: AudioReviewReport) -> None:
@@ -987,7 +1116,11 @@ def _render_transcript_workbench(report: AudioReviewReport) -> None:
                 "开始秒": round(segment.start_ms / 1000, 2),
                 "结束秒": round(segment.end_ms / 1000, 2),
                 "声纹标签": segment.speaker_tag or "",
+                "分组置信度": (
+                    "" if segment.speaker_confidence is None else round(segment.speaker_confidence, 3)
+                ),
                 "映射角色": segment.speaker_role or "",
+                "角色来源": "自动推荐" if segment.speaker_auto else "人工/未映射",
                 "转写文本": to_simplified_chinese(segment.text),
             }
             for segment in report.transcript_segments
@@ -998,7 +1131,7 @@ def _render_transcript_workbench(report: AudioReviewReport) -> None:
             key=editor_key,
             hide_index=True,
             num_rows="dynamic",
-            disabled=["段ID"],
+            disabled=["段ID", "分组置信度", "角色来源"],
             **_stretch(st.data_editor),
         )
         records = edited.to_dict("records") if hasattr(edited, "to_dict") else list(edited)
@@ -1046,10 +1179,15 @@ def _render_transcript_workbench(report: AudioReviewReport) -> None:
                                 confidence=None,
                                 speaker_tag=speaker_tag,
                                 speaker_role=speaker_role,
+                                speaker_auto=False,
                                 revised=True,
                             )
                         )
                     else:
+                        speaker_changed = (
+                            previous.speaker_tag != speaker_tag
+                            or previous.speaker_role != speaker_role
+                        )
                         segments.append(
                             previous.model_copy(
                                 update={
@@ -1058,6 +1196,12 @@ def _render_transcript_workbench(report: AudioReviewReport) -> None:
                                     "text": text,
                                     "speaker_tag": speaker_tag,
                                     "speaker_role": speaker_role,
+                                    "speaker_role_confidence": (
+                                        1.0 if speaker_changed and speaker_role else previous.speaker_role_confidence
+                                    ),
+                                    "speaker_auto": (
+                                        False if speaker_changed else previous.speaker_auto
+                                    ),
                                     "revised": (
                                         normalize_dialogue(previous.text)
                                         != normalize_dialogue(text)
@@ -1226,6 +1370,26 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         st.caption(f"● 字幕 OCR 运行环境就绪 · {ocr_status}")
     else:
         st.warning(f"字幕 OCR 暂不可用，本轮会自动使用纯音频审片。原因：{ocr_status}")
+    use_speaker_clustering = st.checkbox(
+        "启用轻量说话人声学分组（试验）",
+        value=True,
+        help=(
+            "按 ASR 时间段提取轻量声学特征并聚类，再用剧本角色作弱监督。"
+            "它只表示声音相似组，不是身份级声纹识别。"
+        ),
+        on_change=_clear_audio_result,
+    )
+    speaker_count = st.number_input(
+        "预计主要说话人数（0 = 自动估计）",
+        min_value=0,
+        max_value=6,
+        value=0,
+        step=1,
+        disabled=not use_speaker_clustering,
+        help="自动估计不稳定时，可填写本集主要配音人数；旁白也应计入。",
+        on_change=_clear_audio_result,
+    )
+    st.caption("● 分组在本地临时 WAV 上完成，不保存声纹模板；建议先自动估计，再由编导确认角色。")
     use_visual_scan = st.checkbox(
         "启用画面基础质量扫描（试验）",
         value=True,
@@ -1291,6 +1455,8 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
                             subtitle_source_name=(
                                 subtitle_file.name if subtitle_file is not None else None
                             ),
+                            enable_speaker_clustering=use_speaker_clustering,
+                            speaker_count=int(speaker_count),
                             created_at=_now(),
                         )
                         if ocr_startup_warning:

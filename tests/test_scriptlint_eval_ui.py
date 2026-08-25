@@ -118,6 +118,13 @@ def test_audio_review_is_homepage_and_requires_video(tmp_path, monkeypatch):
     assert app.radio[0].value == "视频音频审片"
     assert app.file_uploader[0].label == "上传短剧成片"
     assert app.file_uploader[1].label == "导入成片字幕（可选，SRT/VTT）"
+    assert any(
+        item.label == "启用轻量说话人声学分组（试验）" for item in app.checkbox
+    )
+    assert any(
+        item.label == "预计主要说话人数（0 = 自动估计）"
+        for item in app.number_input
+    )
     next(
         button
         for button in app.button

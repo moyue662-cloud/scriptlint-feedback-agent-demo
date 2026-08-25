@@ -75,7 +75,10 @@ class TranscriptSegment(BaseModel):
     text: str
     confidence: float | None = Field(default=None, ge=0, le=1)
     speaker_tag: str | None = None
+    speaker_confidence: float | None = Field(default=None, ge=0, le=1)
     speaker_role: str | None = None
+    speaker_role_confidence: float | None = Field(default=None, ge=0, le=1)
+    speaker_auto: bool = False
     revised: bool = False
 
     @model_validator(mode="after")
@@ -83,6 +86,34 @@ class TranscriptSegment(BaseModel):
         if self.start_ms > self.end_ms:
             raise ValueError("start_ms 不能大于 end_ms")
         return self
+
+
+class SpeakerClusterSummary(BaseModel):
+    """轻量声学分组及其由剧本台词推断出的角色候选。"""
+
+    tag: str
+    segment_count: int = Field(ge=1)
+    duration_ms: int = Field(ge=0)
+    confidence: float = Field(ge=0, le=1)
+    mapped_role: str | None = None
+    role_confidence: float | None = Field(default=None, ge=0, le=1)
+    role_votes: dict[str, float] = Field(default_factory=dict)
+    sample_texts: list[str] = Field(default_factory=list)
+
+
+class SpeakerConsistencyIssue(BaseModel):
+    """同一声学组的多数角色与当前剧本角色不一致的待复核片段。"""
+
+    id: str
+    segment_id: str
+    speaker_tag: str
+    mapped_role: str
+    expected_role: str
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(ge=0)
+    text: str
+    confidence: float = Field(ge=0, le=1)
+    reason: str
 
 
 class ScriptDialogueLine(BaseModel):
@@ -187,6 +218,12 @@ class AudioReviewReport(BaseModel):
     subtitle_source_name: str | None = None
     manual_revision_count: int = Field(default=0, ge=0)
     speaker_mapping_count: int = Field(default=0, ge=0)
+    speaker_clusters: list[SpeakerClusterSummary] = Field(default_factory=list)
+    speaker_consistency_issues: list[SpeakerConsistencyIssue] = Field(
+        default_factory=list
+    )
+    speaker_clustering_method: str | None = None
+    speaker_clustering_warnings: list[str] = Field(default_factory=list)
     alignments: list[DialogueAlignment]
     overall_similarity: float = Field(ge=0, le=1)
     matched_count: int = Field(ge=0)
