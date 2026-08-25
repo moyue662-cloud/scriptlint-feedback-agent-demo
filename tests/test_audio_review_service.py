@@ -30,6 +30,9 @@ from services.audio_review_service import (
     fuse_subtitle_evidence,
     normalize_dialogue,
     parse_script_dialogues,
+    parse_subtitle_text,
+    revise_audio_report,
+    transcript_segments_to_srt,
     _prepare_ocr_targets,
     _split_transcript_segments,
     to_simplified_chinese,
@@ -55,6 +58,53 @@ def test_extract_script_dialogues_keeps_speaker_and_line_number():
         (2, "林夏", "账本在仓库。"),
         (3, "周远", "我现在就去。"),
     ]
+
+
+def test_parse_srt_and_vtt_into_timestamped_evidence():
+    srt = """1
+00:00:01,200 --> 00:00:02,800
+<b>賬本在倉庫</b>
+
+2
+00:00:03,000 --> 00:00:04,500
+我現在就去
+"""
+    vtt = """WEBVTT
+
+cue-1
+00:05.000 --> 00:06.250 align:middle
+<v 林夏>项目暂停</v>
+"""
+
+    srt_rows = parse_subtitle_text(srt, source_name="episode.srt")
+    vtt_rows = parse_subtitle_text(vtt, source_name="episode.vtt")
+
+    assert [(row.start_ms, row.end_ms, row.text) for row in srt_rows] == [
+        (1200, 2800, "账本在仓库"),
+        (3000, 4500, "我现在就去"),
+    ]
+    assert vtt_rows[0].start_ms == 5000
+    assert vtt_rows[0].end_ms == 6250
+    assert vtt_rows[0].text == "项目暂停"
+    assert vtt_rows[0].source == "file:episode.vtt"
+
+
+def test_export_revised_transcript_as_srt_with_role():
+    value = transcript_segments_to_srt(
+        [
+            TranscriptSegment(
+                id="asr_1",
+                start_ms=1200,
+                end_ms=2800,
+                text="账本在仓库",
+                speaker_role="林夏",
+                revised=True,
+            )
+        ]
+    )
+
+    assert "00:00:01,200 --> 00:00:02,800" in value
+    assert "林夏：账本在仓库" in value
 
 
 def test_markdown_metadata_title_and_character_background_are_not_dialogue():
@@ -311,7 +361,7 @@ def test_subtitle_rescue_removes_overlapping_duplicate_extra_speech():
     assert fused[0].status == DialogueMatchStatus.matched
 
 
-def test_subtitle_does_not_hide_missing_audio():
+def test_subtitle_only_match_becomes_unverified_instead_of_false_missing():
     alignment = DialogueAlignment(
         id="alignment_missing_audio",
         status=DialogueMatchStatus.missing,
@@ -333,9 +383,9 @@ def test_subtitle_does_not_hide_missing_audio():
 
     fused, rescued = fuse_subtitle_evidence([alignment], [subtitle])
 
-    assert rescued == 0
-    assert fused[0].status == DialogueMatchStatus.missing
-    assert "字幕不能证明实际收音完整" in fused[0].reason
+    assert rescued == 1
+    assert fused[0].status == DialogueMatchStatus.unverified
+    assert "待听确认" in fused[0].reason
 
 
 def test_subtitle_rescues_low_confidence_asr_when_speech_overlaps():
@@ -661,6 +711,93 @@ def test_review_video_builds_report_with_hash_and_quality(monkeypatch, tmp_path)
     assert report.ignored_script_lines[0].label == "类型"
     assert len(report.content_hash) == 64
     assert len(report.script_hash) == 64
+
+
+def test_imported_subtitle_skips_ocr_and_can_rescue_asr(monkeypatch, tmp_path):
+    video_path = tmp_path / "with-captions.mp4"
+    video_path.write_bytes(b"not-a-real-video")
+    quality = AudioQualityMetrics(
+        duration_ms=1400,
+        sample_rate=16000,
+        channels=1,
+        rms_dbfs=-18,
+        peak_dbfs=-2,
+        clipping_ratio=0,
+        silence_ratio=0.1,
+    )
+    monkeypatch.setattr(audio_module, "extract_audio_track", lambda *_: quality)
+
+    class ExplodingReader:
+        model_name = "must-not-run"
+
+        def recognize(self, _image):
+            raise AssertionError("导入字幕后不应运行 OCR")
+
+    captions = parse_subtitle_text(
+        "1\n00:00:00,100 --> 00:00:01,300\n账本在仓库\n",
+        source_name="captions.srt",
+    )
+    report = AudioReviewService(
+        _FakeTranscriber(), subtitle_reader=ExplodingReader()
+    ).review_video(
+        video_path=video_path,
+        wav_path=tmp_path / "with-captions.wav",
+        script_text="林夏：账本在仓库。",
+        source_name="with-captions.mp4",
+        subtitle_observations=captions,
+        subtitle_source_name="captions.srt",
+    )
+
+    assert report.subtitle_source_name == "captions.srt"
+    assert report.ocr_frame_count == 0
+    assert report.subtitle_observations[0].source == "file:captions.srt"
+
+
+def test_human_revision_and_role_mapping_realign_without_rerunning_models(
+    monkeypatch, tmp_path
+):
+    video_path = tmp_path / "manual-review.mp4"
+    video_path.write_bytes(b"not-a-real-video")
+    quality = AudioQualityMetrics(
+        duration_ms=1400,
+        sample_rate=16000,
+        channels=1,
+        rms_dbfs=-18,
+        peak_dbfs=-2,
+        clipping_ratio=0,
+        silence_ratio=0.1,
+    )
+    monkeypatch.setattr(audio_module, "extract_audio_track", lambda *_: quality)
+    report = AudioReviewService(_FakeTranscriber()).review_video(
+        video_path=video_path,
+        wav_path=tmp_path / "manual-review.wav",
+        script_text="林夏：项目暂停。",
+        source_name="manual-review.mp4",
+    )
+    assert report.matched_count == 0
+
+    original = report.transcript_segments[0]
+    revised = revise_audio_report(
+        report,
+        script_text="林夏：项目暂停。",
+        transcript_segments=[
+            original.model_copy(
+                update={
+                    "text": "项目暂停",
+                    "speaker_tag": "A",
+                    "speaker_role": "林夏",
+                    "revised": True,
+                }
+            )
+        ],
+    )
+
+    assert revised.matched_count == 1
+    assert revised.changed_count == 0
+    assert revised.manual_revision_count == 1
+    assert revised.speaker_mapping_count == 1
+    assert revised.transcript_segments[0].speaker_tag == "A"
+    assert revised.transcript_segments[0].speaker_role == "林夏"
 
 
 def test_review_video_accepts_cached_segments_from_old_module(monkeypatch, tmp_path):

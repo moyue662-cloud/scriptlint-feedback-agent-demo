@@ -74,6 +74,9 @@ class TranscriptSegment(BaseModel):
     end_ms: int = Field(ge=0)
     text: str
     confidence: float | None = Field(default=None, ge=0, le=1)
+    speaker_tag: str | None = None
+    speaker_role: str | None = None
+    revised: bool = False
 
     @model_validator(mode="after")
     def _valid_segment_range(self) -> "TranscriptSegment":
@@ -113,6 +116,7 @@ class SubtitleObservation(BaseModel):
     frame_number: int = Field(ge=0)
     text: str
     confidence: float = Field(ge=0, le=1)
+    source: str = "ocr"
 
     @model_validator(mode="after")
     def _valid_subtitle_range(self) -> "SubtitleObservation":
@@ -126,6 +130,7 @@ class DialogueMatchStatus(str, Enum):
     changed = "changed"
     missing = "missing"
     extra = "extra"
+    unverified = "unverified"
 
 
 class DialogueAlignment(BaseModel):
@@ -179,12 +184,16 @@ class AudioReviewReport(BaseModel):
     ocr_frame_count: int = Field(default=0, ge=0)
     ocr_rescued_count: int = Field(default=0, ge=0)
     ocr_warnings: list[str] = Field(default_factory=list)
+    subtitle_source_name: str | None = None
+    manual_revision_count: int = Field(default=0, ge=0)
+    speaker_mapping_count: int = Field(default=0, ge=0)
     alignments: list[DialogueAlignment]
     overall_similarity: float = Field(ge=0, le=1)
     matched_count: int = Field(ge=0)
     changed_count: int = Field(ge=0)
     missing_count: int = Field(ge=0)
     extra_count: int = Field(ge=0)
+    unverified_count: int = Field(default=0, ge=0)
     quality: AudioQualityMetrics
     elapsed_ms: float = Field(ge=0)
     created_at: datetime

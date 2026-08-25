@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from functools import lru_cache
 import hashlib
+import html as html_lib
 import math
 from pathlib import Path
 import re
@@ -621,6 +622,90 @@ def assess_text_equivalence(expected: str, actual: str) -> TextEquivalence:
     )
 
 
+_SUBTITLE_TIMING_RE = re.compile(
+    r"(?P<start>(?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})\s*-->\s*"
+    r"(?P<end>(?:\d{1,2}:)?\d{2}:\d{2}[,.]\d{1,3})"
+)
+
+
+def _subtitle_timestamp_ms(value: str) -> int:
+    parts = value.replace(",", ".").split(":")
+    if len(parts) == 2:
+        hours = 0
+        minutes, seconds = parts
+    elif len(parts) == 3:
+        hours, minutes, seconds = parts
+    else:
+        raise AudioReviewError(f"无法识别字幕时间码：{value}")
+    try:
+        total = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except ValueError as exc:
+        raise AudioReviewError(f"无法识别字幕时间码：{value}") from exc
+    return max(0, round(total * 1000))
+
+
+def parse_subtitle_text(
+    content: str,
+    *,
+    source_name: str = "captions.srt",
+) -> list[SubtitleObservation]:
+    """解析 SRT/VTT 为统一字幕证据，不依赖额外第三方库。"""
+    normalized = content.replace("\ufeff", "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    output: list[SubtitleObservation] = []
+    index = 0
+    while index < len(lines):
+        timing = _SUBTITLE_TIMING_RE.search(lines[index].strip())
+        if timing is None:
+            index += 1
+            continue
+        start_ms = _subtitle_timestamp_ms(timing.group("start"))
+        end_ms = _subtitle_timestamp_ms(timing.group("end"))
+        index += 1
+        text_lines: list[str] = []
+        while index < len(lines) and lines[index].strip():
+            line = re.sub(r"<[^>]+>", "", lines[index]).strip()
+            if line:
+                text_lines.append(line)
+            index += 1
+        text = to_simplified_chinese(
+            html_lib.unescape(" ".join(text_lines)).strip()
+        )
+        if end_ms > start_ms and normalize_dialogue(text):
+            output.append(
+                SubtitleObservation(
+                    id=f"subtitle_file_{len(output) + 1:04d}",
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    frame_number=0,
+                    text=text,
+                    confidence=1.0,
+                    source=f"file:{source_name}",
+                )
+            )
+    if not output:
+        raise AudioReviewError("字幕文件中没有找到有效的 SRT/VTT 时间码和文字。")
+    return output
+
+
+def transcript_segments_to_srt(segments: list[TranscriptSegment]) -> str:
+    """把当前（可人工修订的）ASR 时间线导出为标准 SRT。"""
+    def stamp(milliseconds: int) -> str:
+        total_seconds, millis = divmod(max(0, milliseconds), 1000)
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+    blocks = []
+    for index, segment in enumerate(segments, start=1):
+        role = f"{segment.speaker_role}：" if segment.speaker_role else ""
+        blocks.append(
+            f"{index}\n{stamp(segment.start_ms)} --> {stamp(segment.end_ms)}\n"
+            f"{role}{to_simplified_chinese(segment.text).strip()}"
+        )
+    return "\n\n".join(blocks) + ("\n" if blocks else "")
+
+
 def extract_subtitle_observations(
     video_path: str | Path,
     reader: SubtitleReader,
@@ -856,10 +941,17 @@ def fuse_subtitle_evidence(
             else:
                 updates.update(
                     {
-                        "reason": "画面字幕与剧本一致，但同时间段没有可靠语音证据；字幕不能证明实际收音完整",
+                        "status": DialogueMatchStatus.unverified,
+                        "resolved_by_subtitle": True,
+                        "evidence_match_basis": (
+                            f"画面字幕与剧本{script_equivalence.kind}，音频尚未确认"
+                        ),
+                        "reason": "画面字幕与剧本一致，但同时间段没有可靠语音证据；本项降级为待听确认，不计作漏词",
                         "suggestion": "回听字幕对应时间码，区分漏录、音量过低与 ASR 未识别",
                     }
                 )
+                rescued_count += 1
+                used_observations.add(subtitle.id)
         elif status_value == DialogueMatchStatus.changed.value:
             updates.update(
                 {
@@ -1280,6 +1372,8 @@ class AudioReviewService:
         script_text: str,
         source_name: str,
         asr_terms: str | None = None,
+        subtitle_observations: list[SubtitleObservation] | None = None,
+        subtitle_source_name: str | None = None,
         created_at: datetime | None = None,
     ) -> AudioReviewReport:
         started = time.perf_counter()
@@ -1305,11 +1399,20 @@ class AudioReviewService:
         alignments, overall_similarity = align_dialogues(
             script_dialogues, transcript_segments
         )
-        subtitle_observations: list[SubtitleObservation] = []
+        subtitle_observations = [
+            SubtitleObservation.model_validate(_model_payload(item))
+            for item in (subtitle_observations or [])
+        ]
         ocr_frame_count = 0
         ocr_rescued_count = 0
         ocr_warnings: list[str] = []
-        if self._subtitle_reader is not None:
+        if subtitle_observations:
+            alignments, ocr_rescued_count = fuse_subtitle_evidence(
+                alignments,
+                subtitle_observations,
+                transcript_segments,
+            )
+        elif self._subtitle_reader is not None:
             try:
                 subtitle_observations, ocr_frame_count = extract_subtitle_observations(
                     video_path,
@@ -1350,23 +1453,113 @@ class AudioReviewService:
                 _model_payload(item) for item in subtitle_observations
             ],
             ocr_model_name=(
-                self._subtitle_reader.model_name
-                if self._subtitle_reader is not None
-                else None
+                f"导入字幕 · {subtitle_source_name or '未命名文件'}"
+                if subtitle_observations
+                else (
+                    self._subtitle_reader.model_name
+                    if self._subtitle_reader is not None
+                    else None
+                )
             ),
             ocr_frame_count=ocr_frame_count,
             ocr_rescued_count=ocr_rescued_count,
             ocr_warnings=ocr_warnings,
+            subtitle_source_name=subtitle_source_name,
+            manual_revision_count=0,
+            speaker_mapping_count=0,
             alignments=[_model_payload(item) for item in alignments],
             overall_similarity=overall_similarity,
             matched_count=counts[DialogueMatchStatus.matched],
             changed_count=counts[DialogueMatchStatus.changed],
             missing_count=counts[DialogueMatchStatus.missing],
             extra_count=counts[DialogueMatchStatus.extra],
+            unverified_count=counts[DialogueMatchStatus.unverified],
             quality=_model_payload(quality),
             elapsed_ms=(time.perf_counter() - started) * 1000,
             created_at=created_at or datetime.now(timezone.utc),
         )
+
+
+def revise_audio_report(
+    report: AudioReviewReport,
+    *,
+    script_text: str,
+    transcript_segments: list[TranscriptSegment],
+) -> AudioReviewReport:
+    """应用人工修订与角色映射后重跑轻量对齐，不重复执行 ASR/OCR。"""
+    started = time.perf_counter()
+    revised_segments: list[TranscriptSegment] = []
+    original_by_id = {item.id: item for item in report.transcript_segments}
+    manual_revision_count = 0
+    for index, raw in enumerate(transcript_segments, start=1):
+        segment = TranscriptSegment.model_validate(_model_payload(raw))
+        text = to_simplified_chinese(segment.text).strip()
+        if not normalize_dialogue(text) or segment.end_ms <= segment.start_ms:
+            continue
+        previous = original_by_id.get(segment.id)
+        revised = bool(
+            segment.revised
+            or previous is None
+            or normalize_dialogue(previous.text) != normalize_dialogue(text)
+        )
+        if revised:
+            manual_revision_count += 1
+        revised_segments.append(
+            segment.model_copy(
+                update={
+                    "id": segment.id or f"asr_manual_{index:04d}",
+                    "text": text,
+                    "speaker_tag": (segment.speaker_tag or "").strip() or None,
+                    "speaker_role": (segment.speaker_role or "").strip() or None,
+                    "revised": revised,
+                }
+            )
+        )
+    revised_segments.sort(key=lambda item: (item.start_ms, item.end_ms))
+    if not revised_segments:
+        raise AudioReviewError("人工修订后没有可用的语音文本段。")
+
+    parse_result = parse_script_dialogues(script_text)
+    alignments, overall_similarity = align_dialogues(
+        parse_result.dialogues,
+        revised_segments,
+    )
+    rescued_count = 0
+    if report.subtitle_observations:
+        alignments, rescued_count = fuse_subtitle_evidence(
+            alignments,
+            report.subtitle_observations,
+            revised_segments,
+        )
+    counts = {
+        status: sum(item.status == status for item in alignments)
+        for status in DialogueMatchStatus
+    }
+    payload = report.model_dump(mode="python")
+    payload.update(
+        {
+            "script_hash": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+            "transcript_segments": [_model_payload(item) for item in revised_segments],
+            "script_dialogues": [_model_payload(item) for item in parse_result.dialogues],
+            "ignored_script_lines": [
+                _model_payload(item) for item in parse_result.ignored_lines
+            ],
+            "alignments": [_model_payload(item) for item in alignments],
+            "overall_similarity": overall_similarity,
+            "matched_count": counts[DialogueMatchStatus.matched],
+            "changed_count": counts[DialogueMatchStatus.changed],
+            "missing_count": counts[DialogueMatchStatus.missing],
+            "extra_count": counts[DialogueMatchStatus.extra],
+            "unverified_count": counts[DialogueMatchStatus.unverified],
+            "ocr_rescued_count": rescued_count,
+            "manual_revision_count": manual_revision_count,
+            "speaker_mapping_count": sum(
+                bool(item.speaker_role) for item in revised_segments
+            ),
+            "elapsed_ms": report.elapsed_ms + (time.perf_counter() - started) * 1000,
+        }
+    )
+    return AudioReviewReport.model_validate(payload)
 
 
 def _model_payload(value: object) -> object:

@@ -20,6 +20,7 @@ from repositories import SQLiteRepository
 from schemas.multimodal import (
     AudioReviewReport,
     DialogueMatchStatus,
+    TranscriptSegment,
     VisualIssueType,
     VisualQualityReport,
 )
@@ -45,7 +46,10 @@ from services.audio_review_service import (
     RapidOcrSubtitleReader,
     normalize_dialogue,
     parse_script_dialogues,
+    parse_subtitle_text,
+    revise_audio_report,
     to_simplified_chinese,
+    transcript_segments_to_srt,
 )
 from services.visual_review_service import analyze_visual_track
 
@@ -53,7 +57,7 @@ from services.visual_review_service import analyze_visual_track
 CST = timezone(timedelta(hours=8))
 TEAM_ID = "team_scriptlint_demo"
 DEFAULT_PROJECT_ID = "project_my_short_drama"
-APP_BUILD = "multimodal-foundation-v1 · 2026-08-25"
+APP_BUILD = "multimodal-review-workbench-v1 · 2026-08-25"
 DEMO_SCRIPT = """第3集 内景 灵堂 日
 女主左手缠着厚厚的绷带，却用左手提起沉重的箱子。
 男主左脸有一道新伤。
@@ -342,8 +346,8 @@ def _sidebar(repo: SQLiteRepository) -> None:
         st.markdown("<div style='font-size:12px;line-height:1.9;color:#bdc3d1;'>"
                     "<span style='color:#60d6b1'>●</span> 本地 SQLite<br>"
                     "<span style='color:#60d6b1'>●</span> 六类文本审计<br>"
-                    "<span style='color:#60d6b1'>●</span> 音频·字幕·画面质量时间线</div>", unsafe_allow_html=True)
-        st.caption("已完成画面技术信号抽检；人物动作、表情、服化道语义仍属后续视觉阶段。")
+                    "<span style='color:#60d6b1'>●</span> 音频·字幕·人工角色·画面时间线</div>", unsafe_allow_html=True)
+        st.caption("已支持字幕文件、人工修订与角色映射；自动声纹和人物视觉语义仍属后续阶段。")
 
 
 def _header() -> None:
@@ -352,7 +356,7 @@ def _header() -> None:
         '<h1>从剧本到成片，问题都有证据。</h1>'
         '<p>上传成片后提取音轨、生成时间码转写并与剧本台词对齐；同时检查人物动作、外观、'
         '知情边界与道具连续性，把编导纠正沉淀为后续版本可复用的项目规则。</p></div>'
-        '<div class="mode-pill"><span class="mode-dot"></span>多模态审片 · Foundation</div></div>',
+        '<div class="mode-pill"><span class="mode-dot"></span>多模态审片 · Review Workbench</div></div>',
         unsafe_allow_html=True,
     )
     stage = st.session_state.get("demo_stage", 1)
@@ -653,6 +657,11 @@ def _clear_audio_result() -> None:
     st.session_state.pop("audio_review_report", None)
     st.session_state.pop("audio_script_result", None)
     st.session_state.pop("visual_review_report", None)
+    st.session_state.pop("review_video_start_ms", None)
+
+
+def _set_review_start(milliseconds: int | None) -> None:
+    st.session_state["review_video_start_ms"] = max(0, int(milliseconds or 0) - 1000)
 
 
 def _ensure_current_build_state() -> None:
@@ -661,6 +670,7 @@ def _ensure_current_build_state() -> None:
         return
     _clear_audio_result()
     st.session_state.pop("audio_review_video", None)
+    st.session_state.pop("review_subtitle_file", None)
     st.session_state["audio_model_name"] = "base"
     st.session_state["_scriptlint_build"] = APP_BUILD
 
@@ -712,22 +722,41 @@ def _render_audio_report(report: AudioReviewReport) -> None:
     rescued = [
         item
         for item in report.alignments
-        if getattr(item, "resolved_by_audio", False)
-        or getattr(item, "resolved_by_subtitle", False)
+        if (
+            getattr(item, "resolved_by_audio", False)
+            or getattr(item, "resolved_by_subtitle", False)
+        )
+        and getattr(item.status, "value", item.status)
+        == DialogueMatchStatus.matched.value
     ]
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    pending_audio = [
+        item
+        for item in report.alignments
+        if getattr(item.status, "value", item.status)
+        == DialogueMatchStatus.unverified.value
+    ]
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
     c1.metric("字符原始相似度", f"{report.overall_similarity:.0%}")
     c2.metric("基本一致", report.matched_count)
     c3.metric("疑似改词", report.changed_count)
     c4.metric("疑似漏词", report.missing_count)
     c5.metric("未匹配语音", report.extra_count)
-    c6.metric("证据消歧", len(rescued))
+    c6.metric("待听确认", report.unverified_count)
+    c7.metric("证据消歧", report.ocr_rescued_count)
     st.caption(
         f"ASR 模型：{report.model_name} · 识别语言：{report.detected_language or '未知'} · "
         f"音轨时长：{report.quality.duration_ms / 1000:.1f}s · 总耗时：{report.elapsed_ms / 1000:.1f}s · "
         f"字幕 OCR：{report.ocr_model_name or '未启用'}"
     )
     st.caption("字符原始相似度仅用于诊断；最终结论还会综合简体字面、带声调读音、轻量语义和字幕证据。")
+    revision_notice = st.session_state.pop("audio_revision_notice", None)
+    if revision_notice:
+        st.success(revision_notice)
+    if report.manual_revision_count or report.speaker_mapping_count:
+        st.info(
+            f"人工工作台已应用：修订 {report.manual_revision_count} 段转写，"
+            f"映射 {report.speaker_mapping_count} 段角色；当前结论已重新计算。"
+        )
 
     if report.quality.warnings:
         for warning in report.quality.warnings:
@@ -738,7 +767,12 @@ def _render_audio_report(report: AudioReviewReport) -> None:
     for warning in report.ocr_warnings:
         st.warning(f"字幕 OCR 提示：{warning}；本轮已保留纯音频审片结果。")
     if report.ocr_model_name and not report.ocr_warnings:
-        if report.subtitle_observations:
+        if report.subtitle_source_name:
+            st.info(
+                f"已导入字幕文件 {report.subtitle_source_name}，得到 "
+                f"{len(report.subtitle_observations)} 条时间码文字证据；本轮未运行画面 OCR。"
+            )
+        elif report.subtitle_observations:
             st.info(
                 f"字幕 OCR 抽检 {report.ocr_frame_count} 帧，得到 "
                 f"{len(report.subtitle_observations)} 条去重文字证据。"
@@ -778,6 +812,28 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                 **_stretch(st.dataframe),
             )
 
+    if pending_audio:
+        st.warning(
+            f"有 {len(pending_audio)} 条台词的字幕与剧本一致，但 ASR 没有稳定听出。"
+            "这些条目不计为漏词，需通过回听或下方人工修订工作台确认。"
+        )
+        with st.expander(f"查看待听确认台词（{len(pending_audio)} 条）"):
+            for item in pending_audio:
+                seek_ms = item.start_ms if item.start_ms is not None else item.subtitle_start_ms
+                left, right = st.columns([1, 4])
+                with left:
+                    st.button(
+                        f"▶ {_timestamp(seek_ms)}",
+                        key=f"seek_unverified_{report.content_hash[:10]}_{item.id}",
+                        on_click=_set_review_start,
+                        args=(seek_ms,),
+                    )
+                with right:
+                    st.caption(
+                        f"剧本第{item.script_line_number or '—'}行 · {item.speaker or '未标角色'}："
+                        f"{item.expected_text or '—'}"
+                    )
+
     issues = [
         item
         for item in report.alignments
@@ -814,6 +870,13 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                     f"{subtitle_time}</b><br>“{html.escape(item.subtitle_text)}”</div>"
                 )
             speaker_suffix = f" · {html.escape(item.speaker)}" if item.speaker else ""
+            if item.start_ms is not None:
+                st.button(
+                    f"▶ 回看 {_timestamp(item.start_ms)}",
+                    key=f"seek_audio_{report.content_hash[:10]}_{item.id}",
+                    on_click=_set_review_start,
+                    args=(item.start_ms,),
+                )
             st.markdown(
                 "<div class='finding'>"
                 f"<div class='finding-title'>{labels.get(status_value, '需复核')} · {time_range}</div>"
@@ -855,6 +918,8 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                 {
                     "开始": _timestamp(segment.start_ms),
                     "结束": _timestamp(segment.end_ms),
+                    "声纹标签": segment.speaker_tag or "—",
+                    "映射角色": segment.speaker_role or "—",
                     "ASR 文本（简体）": to_simplified_chinese(segment.text),
                     "置信度": "—" if segment.confidence is None else f"{segment.confidence:.0%}",
                 }
@@ -866,7 +931,8 @@ def _render_audio_report(report: AudioReviewReport) -> None:
     with st.expander("查看音轨质量指标"):
         st.json(report.quality.model_dump(mode="json"))
     if report.subtitle_observations:
-        with st.expander(f"查看画面字幕 OCR 时间线（{len(report.subtitle_observations)} 条）"):
+        subtitle_label = "导入字幕" if report.subtitle_source_name else "画面字幕 OCR"
+        with st.expander(f"查看{subtitle_label}时间线（{len(report.subtitle_observations)} 条）"):
             st.dataframe(
                 [
                     {
@@ -880,6 +946,7 @@ def _render_audio_report(report: AudioReviewReport) -> None:
                 hide_index=True,
                 **_stretch(st.dataframe),
             )
+    _render_transcript_workbench(report)
     if report.ignored_script_lines:
         with st.expander(f"本轮未参与音频对齐的说明/元数据（{len(report.ignored_script_lines)} 行）"):
             st.dataframe(
@@ -901,9 +968,117 @@ def _render_audio_report(report: AudioReviewReport) -> None:
         mime="application/json",
     )
     st.info(
-        "重要边界：字幕 OCR 只能读取画面中的硬字幕，不等于理解人物动作或确认实际发音；"
-        "仅凭音频仍不能可靠判断是谁说的，也不能判断表情、服装和道具。所有异常必须由编导回看时间码确认。"
+        "重要边界：字幕文件/OCR 只能提供画面文字，不等于理解人物动作或确认实际发音；"
+        "当前角色映射由编导人工确认，尚未自动识别声纹。所有异常必须回看时间码确认。"
     )
+
+
+def _render_transcript_workbench(report: AudioReviewReport) -> None:
+    """让编导修订 ASR 并手工绑定角色；重算对齐但不重复跑模型。"""
+    with st.expander("人工修订 ASR 与角色映射（多模态第3步）"):
+        st.caption(
+            "可直接改正同音字或漏识别，并给每段填写声纹标签（如 A/B）和角色名。"
+            "如果整句漏识别，可新增一行并填写开始/结束秒。应用后只重跑文本对齐，"
+            "不会再次消耗 Whisper/OCR。"
+        )
+        rows = [
+            {
+                "段ID": segment.id,
+                "开始秒": round(segment.start_ms / 1000, 2),
+                "结束秒": round(segment.end_ms / 1000, 2),
+                "声纹标签": segment.speaker_tag or "",
+                "映射角色": segment.speaker_role or "",
+                "转写文本": to_simplified_chinese(segment.text),
+            }
+            for segment in report.transcript_segments
+        ]
+        editor_key = f"transcript_editor_{report.content_hash[:12]}_{report.script_hash[:8]}"
+        edited = st.data_editor(
+            rows,
+            key=editor_key,
+            hide_index=True,
+            num_rows="dynamic",
+            disabled=["段ID"],
+            **_stretch(st.data_editor),
+        )
+        records = edited.to_dict("records") if hasattr(edited, "to_dict") else list(edited)
+        c1, c2 = st.columns(2)
+        with c1:
+            apply_revision = st.button(
+                "应用人工修订并重新对齐",
+                key=f"apply_revision_{report.content_hash[:12]}",
+                type="primary",
+                **_stretch(st.button),
+            )
+        with c2:
+            st.download_button(
+                "导出当前转写 SRT",
+                data=transcript_segments_to_srt(report.transcript_segments),
+                file_name="scriptlint_revised_transcript.srt",
+                mime="application/x-subrip",
+                key=f"download_srt_{report.content_hash[:12]}",
+                **_stretch(st.download_button),
+            )
+        if apply_revision:
+            original = {item.id: item for item in report.transcript_segments}
+            segments: list[TranscriptSegment] = []
+            try:
+                for index, row in enumerate(records, start=1):
+                    def cell(name: str, default=""):
+                        value = row.get(name, default)
+                        return default if value is None or value != value else value
+
+                    raw_id = cell("段ID")
+                    segment_id = "" if raw_id is None else str(raw_id).strip()
+                    previous = original.get(segment_id)
+                    text = str(cell("转写文本")).strip()
+                    start_ms = round(float(cell("开始秒", 0) or 0) * 1000)
+                    end_ms = round(float(cell("结束秒", 0) or 0) * 1000)
+                    speaker_tag = str(cell("声纹标签")).strip() or None
+                    speaker_role = str(cell("映射角色")).strip() or None
+                    if previous is None:
+                        segments.append(
+                            TranscriptSegment(
+                                id=segment_id or f"asr_manual_{index:04d}",
+                                start_ms=start_ms,
+                                end_ms=end_ms,
+                                text=text,
+                                confidence=None,
+                                speaker_tag=speaker_tag,
+                                speaker_role=speaker_role,
+                                revised=True,
+                            )
+                        )
+                    else:
+                        segments.append(
+                            previous.model_copy(
+                                update={
+                                    "start_ms": start_ms,
+                                    "end_ms": end_ms,
+                                    "text": text,
+                                    "speaker_tag": speaker_tag,
+                                    "speaker_role": speaker_role,
+                                    "revised": (
+                                        normalize_dialogue(previous.text)
+                                        != normalize_dialogue(text)
+                                        or previous.start_ms != start_ms
+                                        or previous.end_ms != end_ms
+                                    ),
+                                }
+                            )
+                        )
+                revised = revise_audio_report(
+                    report,
+                    script_text=st.session_state.get("script_input", ""),
+                    transcript_segments=segments,
+                )
+                st.session_state["audio_review_report"] = revised
+                st.session_state["audio_revision_notice"] = (
+                    "人工修订和角色映射已应用，台词差异已重新计算。"
+                )
+                st.rerun()
+            except (AudioReviewError, TypeError, ValueError) as exc:
+                st.error(str(exc))
 
 
 def _render_visual_report(report: VisualQualityReport) -> None:
@@ -929,6 +1104,21 @@ def _render_visual_report(report: VisualQualityReport) -> None:
         st.warning(
             f"发现 {len(report.issues)} 个画面质量候选；动画的静止镜头、"
             "转场黑帧可能是创作设计，需由编导按时间码确认。"
+        )
+        visual_options = {
+            f"{labels[item.issue_type]} · {_timestamp(item.start_ms)}–{_timestamp(item.end_ms)}": item.start_ms
+            for item in report.issues
+        }
+        selected_visual_issue = st.selectbox(
+            "选择画面问题时间码",
+            list(visual_options),
+            key=f"visual_seek_select_{report.sampled_frame_count}_{len(report.issues)}",
+        )
+        st.button(
+            "▶ 在播放器中回看这个画面问题",
+            key=f"visual_seek_button_{report.sampled_frame_count}_{len(report.issues)}",
+            on_click=_set_review_start,
+            args=(visual_options[selected_visual_issue],),
         )
         st.dataframe(
             [
@@ -986,8 +1176,22 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
         on_change=_clear_audio_result,
     )
     if video is not None:
-        st.video(video.getvalue())
+        review_start_ms = int(st.session_state.get("review_video_start_ms", 0) or 0)
+        st.video(video.getvalue(), start_time=max(0, review_start_ms // 1000))
         st.caption(f"已选择：{video.name} · {video.size / 1024 / 1024:.1f}MB")
+        if review_start_ms:
+            st.success(f"定位播放器已跳到 {_timestamp(review_start_ms)} 附近。")
+    subtitle_file = st.file_uploader(
+        "导入成片字幕（可选，SRT/VTT）",
+        type=["srt", "vtt"],
+        key="review_subtitle_file",
+        help="有字幕文件时优先使用它作为时间码证据，并跳过耗 CPU 的画面字幕 OCR。",
+        on_change=_clear_audio_result,
+    )
+    if subtitle_file is not None:
+        st.caption(
+            f"已选择字幕：{subtitle_file.name} · 将优先使用文件时间码，避免重复 OCR。"
+        )
     model_labels = {
         "tiny": "tiny｜最快，仅适合流程演示",
         "base": "base｜平衡模式（推荐）",
@@ -1012,11 +1216,13 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
     ocr_ready, ocr_status = _ocr_runtime_probe(schema_epoch)
     use_subtitle_ocr = st.checkbox(
         "启用画面字幕 OCR 交叉确认",
-        value=ocr_ready,
-        disabled=not ocr_ready,
+        value=ocr_ready and subtitle_file is None,
+        disabled=not ocr_ready or subtitle_file is not None,
         help="抽取视频下半屏硬字幕，与 ASR 和剧本三方比对；能降低同音字误报，但会增加处理时间。",
     )
-    if ocr_ready:
+    if subtitle_file is not None:
+        st.caption("● 已导入字幕文件，本轮自动跳过画面字幕 OCR。")
+    elif ocr_ready:
         st.caption(f"● 字幕 OCR 运行环境就绪 · {ocr_status}")
     else:
         st.warning(f"字幕 OCR 暂不可用，本轮会自动使用纯音频审片。原因：{ocr_status}")
@@ -1053,9 +1259,20 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
                         video_path = Path(temp_dir) / f"source{suffix}"
                         wav_path = Path(temp_dir) / "audio.wav"
                         video_path.write_bytes(video.getvalue())
+                        imported_subtitles = []
+                        if subtitle_file is not None:
+                            raw_subtitle = subtitle_file.getvalue()
+                            try:
+                                subtitle_text = raw_subtitle.decode("utf-8-sig")
+                            except UnicodeDecodeError:
+                                subtitle_text = raw_subtitle.decode("gb18030")
+                            imported_subtitles = parse_subtitle_text(
+                                subtitle_text,
+                                source_name=subtitle_file.name,
+                            )
                         subtitle_reader = None
                         ocr_startup_warning = None
-                        if use_subtitle_ocr:
+                        if use_subtitle_ocr and not imported_subtitles:
                             try:
                                 subtitle_reader = _subtitle_reader(schema_epoch)
                             except AudioReviewError as exc:
@@ -1070,6 +1287,10 @@ def _audio_review(repo: SQLiteRepository, agent: ScriptLintAgent) -> None:
                             script_text=script_text,
                             source_name=video.name,
                             asr_terms=st.session_state.get("asr_terms", ""),
+                            subtitle_observations=imported_subtitles,
+                            subtitle_source_name=(
+                                subtitle_file.name if subtitle_file is not None else None
+                            ),
                             created_at=_now(),
                         )
                         if ocr_startup_warning:
@@ -1313,12 +1534,12 @@ def _validation(repo: SQLiteRepository) -> None:
 def _about() -> None:
     st.markdown('<div class="panel"><div class="panel-title">现在能做什么，未来怎样进入视频审片？</div>'
                 '<div class="panel-note" style="font-size:14px;max-width:850px;margin-top:12px">'
-                '现在：上传短剧成片 → 提取音轨生成时间码 ASR + 抽取画面硬字幕 → 与剧本台词三方对齐；同时提取人物事实、'
-                '检查局部连续性、接收编导纠正并在后续版本复用。音频问题可回到时间码，规则问题可回到反馈原话。</div><hr>'
+                '现在：上传短剧成片 → 提取时间码 ASR + 导入字幕或抽取硬字幕 → 与剧本台词三方对齐；编导可修订转写、'
+                '新增漏识别片段、映射角色并跳转问题时间码，同时把纠正沉淀为后续版本规则。</div><hr>'
                 '<div class="section-label">产品边界</div>'
-                '<div class="panel-note" style="font-size:13px">当前 Demo 已实现视频上传、音轨解码、中文 ASR、硬字幕 OCR 与剧本台词对齐；'
-                'OCR 只读取画面文字，仍不能判断人物动作、表情、服装和道具。上述视觉能力仍需镜头切分、角色跟踪与视觉模型，'
-                '因此当前产品准确表述为“音频 + 字幕审片 MVP”，而不是完整视觉审片。</div></div>',
+                '<div class="panel-note" style="font-size:13px">当前 Demo 已实现视频、ASR、SRT/VTT、硬字幕 OCR、人工角色映射和画面质量时间线；'
+                '尚未自动识别声纹，也不能判断人物动作、表情、服装和道具。上述能力仍需角色跟踪与视觉模型，'
+                '因此当前产品准确表述为“多模态审片人工工作台”，而不是完整视觉审片。</div></div>',
                 unsafe_allow_html=True)
 
 

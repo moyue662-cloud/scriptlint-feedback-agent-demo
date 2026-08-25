@@ -117,6 +117,7 @@ def test_audio_review_is_homepage_and_requires_video(tmp_path, monkeypatch):
     assert not app.exception
     assert app.radio[0].value == "视频音频审片"
     assert app.file_uploader[0].label == "上传短剧成片"
+    assert app.file_uploader[1].label == "导入成片字幕（可选，SRT/VTT）"
     next(
         button
         for button in app.button
@@ -124,6 +125,22 @@ def test_audio_review_is_homepage_and_requires_video(tmp_path, monkeypatch):
     ).click().run(timeout=20)
     assert not app.exception
     assert any("请先上传视频文件" in item.value for item in app.warning)
+
+
+def test_audio_review_accepts_external_subtitle_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("DP_DB_PATH", str(tmp_path / "scriptlint_subtitle_ui.db"))
+    app = AppTest.from_file(str(APP_PATH)).run(timeout=20)
+    subtitle = "1\n00:00:01,000 --> 00:00:02,000\n账本在仓库\n"
+
+    app.file_uploader[1].set_value(
+        ("episode.srt", subtitle.encode("utf-8"), "application/x-subrip")
+    ).run(timeout=20)
+
+    assert not app.exception
+    assert any("已选择字幕：episode.srt" in item.value for item in app.caption)
+    assert next(
+        item for item in app.checkbox if item.label == "启用画面字幕 OCR 交叉确认"
+    ).disabled
 
 
 def test_audio_review_previews_dialogue_and_excludes_metadata(tmp_path, monkeypatch):
