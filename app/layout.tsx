@@ -13,6 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://sceneflow-script.dut-wuwai-5040.chatgpt.site'),
   title: '剧序 SceneFlow｜短剧交互编译工作台',
   description: '将人类剧本转换为AI可稳定执行的交互节拍、规则报告与模型Prompt。',
   openGraph: {
