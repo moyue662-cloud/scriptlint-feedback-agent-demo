@@ -150,10 +150,13 @@ export function addStoryboardRepairHistory(current: StoryboardResult, repaired: 
 export function finalizeStoryboard(
   raw: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>,
   analysis: AnalysisResult,
+  lockedShotIds: string[] = [],
 ): StoryboardResult {
   const shots: StoryboardShot[] = [];
+  const lockedIds = new Set(lockedShotIds);
   raw.shots.forEach((shot, index) => {
-    const continuous = index > 0 && /连续承接|直接承接|无变化/.test(shot.continuityReason);
+    const continuous = index > 0 && !lockedIds.has(shot.id) &&
+      /连续承接|直接承接|无变化/.test(shot.continuityReason);
     shots.push({
       ...shot,
       startState: continuous ? { ...shots[index - 1].endState } : shot.startState,

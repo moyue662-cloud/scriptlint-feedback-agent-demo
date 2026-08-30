@@ -179,7 +179,7 @@ export async function POST(request: Request) {
     const scoped = repairMode && body.current && scope
       ? enforceStoryboardRepairScope(body.current, parsed, scope)
       : parsed;
-    const finalized = finalizeStoryboard(scoped, body.analysis);
+    const finalized = finalizeStoryboard(scoped, body.analysis, scope?.lockedShotIds);
     const result = repairMode && body.current
       ? addStoryboardRepairHistory(body.current, finalized)
       : finalized;
