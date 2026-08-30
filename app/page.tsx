@@ -114,6 +114,8 @@ export default function Home() {
   const [project, setProject] = useState<SceneProject | null>(null);
   const [projectName, setProjectName] = useState('');
   const [isProjectSaving, setIsProjectSaving] = useState(false);
+  const [isProjectApprovalSaving, setIsProjectApprovalSaving] = useState(false);
+  const [isProjectExporting, setIsProjectExporting] = useState(false);
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
   const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>('idle');
   const [pipelineStep, setPipelineStep] = useState('');
@@ -209,6 +211,52 @@ export default function Home() {
     }
   }
 
+  async function updateProjectApproval(approved: boolean) {
+    if (busy) return;
+    setIsProjectApprovalSaving(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/project', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ approved }),
+      });
+      const payload = await response.json() as { project?: SceneProject; error?: string };
+      if (!response.ok || !payload.project) throw new Error(payload.error || '项目终审状态保存失败');
+      setProject(payload.project);
+      setProjectName(payload.project.name);
+      setNotice(approved ? '整部项目已通过人工终审，可以导出最终执行包。' : '整部项目终审已撤销。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '项目终审状态保存失败，请稍后重试。');
+    } finally {
+      setIsProjectApprovalSaving(false);
+    }
+  }
+
+  async function exportProjectPackage() {
+    if (isProjectExporting) return;
+    setIsProjectExporting(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/export');
+      const payload = await response.json() as Record<string, unknown> & { error?: string };
+      if (!response.ok) throw new Error(payload.error || '项目执行包生成失败');
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const safeProjectName = (project?.name || '剧序项目').replace(/[\\/:*?"<>|]/g, '-');
+      anchor.href = url;
+      anchor.download = `${safeProjectName}-${project?.approvedAt ? '最终执行包' : '审查草稿'}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setNotice(project?.approvedAt ? '最终项目执行包已导出。' : '项目审查草稿已导出；通过全部门禁后可生成最终执行包。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '项目执行包生成失败，请稍后重试。');
+    } finally {
+      setIsProjectExporting(false);
+    }
+  }
+
   function updateEpisodeSummaryDraft(field: keyof EpisodeSummaryDraft, value: string) {
     if (!activeSummaryEpisode) return;
     setEpisodeSummaryDrafts((current) => ({
@@ -240,6 +288,7 @@ export default function Home() {
         ...current.filter((summary) => summary.episodeNumber !== savedSummary.episodeNumber),
         savedSummary,
       ].sort((a, b) => a.episodeNumber - b.episodeNumber));
+      await loadProject();
       setNotice(`第 ${activeSummaryEpisode} 集总结已保存。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '集数总结保存失败，请稍后重试。');
@@ -250,19 +299,21 @@ export default function Home() {
 
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
-    if (saved) {
-      setScript(saved);
-      setResult(analyzeScript(saved));
-    }
-    void loadScenes();
-    void loadEpisodeSummaries();
-    void loadProject();
+    queueMicrotask(() => {
+      if (saved) {
+        setScript(saved);
+        setResult(analyzeScript(saved));
+      }
+      void loadScenes();
+      void loadEpisodeSummaries();
+      void loadProject();
+    });
   }, []);
 
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isEpisodeSummarySaving || isPipelineRunning || isProjectSaving;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isEpisodeSummarySaving || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -333,6 +384,9 @@ export default function Home() {
   const activeEpisodeReview = activeSummaryEpisode
     ? episodeReviews.find((review) => review.episodeNumber === activeSummaryEpisode) ?? null
     : null;
+  const projectReady = episodeReviews.length > 0 && episodeReviews.every((review) => review.status === 'ready');
+  const blockedEpisodeCount = episodeReviews.filter((review) => review.status === 'blocked').length;
+  const attentionEpisodeCount = episodeReviews.filter((review) => review.status === 'attention').length;
   const activeSavedScene = useMemo(
     () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
     [scenes, script],
@@ -620,7 +674,7 @@ export default function Home() {
         error?: string;
       };
       if (!response.ok || !payload.saved) throw new Error(payload.error || '场次状态保存失败');
-      await loadScenes();
+      await Promise.all([loadScenes(), loadProject()]);
       setNotice(`第 ${payload.saved.episodeNumber} 集第 ${payload.saved.sceneOrder} 场状态${payload.saved.updated ? '已更新' : '已保存'}，编译下一场时会自动继承。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '场次状态保存失败，请稍后重试。');
@@ -658,7 +712,7 @@ export default function Home() {
       const payload = await response.json() as { moved?: boolean; error?: string };
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
-        await loadScenes();
+        await Promise.all([loadScenes(), loadProject()]);
         setNotice('场次顺序已调整，时间线和下一场继承关系已更新。');
       } else {
         setNotice(direction === 'move-up' ? '已经是本项目最前一场。' : '已经是本项目最后一场。');
@@ -682,7 +736,7 @@ export default function Home() {
       const payload = await response.json() as { moved?: boolean; error?: string };
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
-        await loadScenes();
+        await Promise.all([loadScenes(), loadProject()]);
         setNotice('场次顺序已调整，时间线和下一场继承关系已更新。');
       }
     } catch (error) {
@@ -732,7 +786,7 @@ export default function Home() {
       });
       const payload = await response.json() as { tracking?: StoredScene['deliveryTracking']; error?: string };
       if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
-      await loadScenes();
+      await Promise.all([loadScenes(), loadProject()]);
       setNotice('制作进度已保存，刷新页面后仍可继续。');
     }).catch((error) => {
       setNotice(error instanceof Error ? error.message : '制作进度保存失败，请稍后重试。');
@@ -851,9 +905,9 @@ export default function Home() {
                   placeholder="在这里输入一场戏……"
                 />
                 {notice && (
-                  <div role="status" className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
+                  <output className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
                     <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />{notice}
-                  </div>
+                  </output>
                 )}
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                   <button className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" onClick={() => setScript(sampleScript)}>
@@ -1247,6 +1301,43 @@ export default function Home() {
                       <div className="mt-4 flex items-center gap-3"><Progress value={sceneTimeline.productionProgress} className="h-2 flex-1 bg-slate-200" /><span className="min-w-12 text-right text-xs font-semibold tabular-nums text-slate-800">{sceneTimeline.productionProgress}%</span></div>
                       <div className="mt-3 flex flex-wrap gap-2">
                         {(Object.keys(sceneStatusLabels) as SceneProductionStatus[]).map((status) => <Badge key={status} variant="outline" className={sceneStatusClasses[status]}>{sceneStatusLabels[status]} {sceneTimeline.statusCounts[status]}</Badge>)}
+                      </div>
+                    </div>
+                  )}
+
+                  {scenes.length > 0 && (
+                    <div className={`mb-4 rounded-xl border p-4 ${project?.approvedAt && projectReady ? 'border-emerald-200 bg-emerald-50/60' : 'border-amber-200 bg-amber-50/55'}`}>
+                      <div className="flex flex-col justify-between gap-4 xl:flex-row xl:items-start">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className={`grid size-9 place-items-center rounded-xl ${project?.approvedAt && projectReady ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}><PackageCheck className="size-4" /></span>
+                            <div>
+                              <p className="text-sm font-semibold text-slate-950">项目最终交付门禁</p>
+                              <p className="mt-0.5 text-xs text-slate-700">全部集数通过结构规则和镜头验收后，由人完成最后一次整部项目确认。</p>
+                            </div>
+                            <Badge variant="outline" className={project?.approvedAt && projectReady ? 'border-emerald-200 bg-white text-emerald-800' : projectReady ? 'border-sky-200 bg-white text-sky-800' : 'border-amber-200 bg-white text-amber-800'}>
+                              {project?.approvedAt && projectReady ? '最终执行包就绪' : projectReady ? '等待人工终审' : '门禁未通过'}
+                            </Badge>
+                          </div>
+                          <div className="mt-4 grid gap-2 sm:grid-cols-4">
+                            <div className="rounded-lg bg-white/80 p-3 text-xs text-slate-700"><p className="text-lg font-semibold tabular-nums text-slate-950">{episodeReviews.length}</p><p>总集数</p></div>
+                            <div className="rounded-lg bg-white/80 p-3 text-xs text-rose-700"><p className="text-lg font-semibold tabular-nums">{blockedEpisodeCount}</p><p>阻断集数</p></div>
+                            <div className="rounded-lg bg-white/80 p-3 text-xs text-amber-700"><p className="text-lg font-semibold tabular-nums">{attentionEpisodeCount}</p><p>待完善集数</p></div>
+                            <div className="rounded-lg bg-white/80 p-3 text-xs text-emerald-700"><p className="text-lg font-semibold tabular-nums">{sceneTimeline.acceptedShots}/{sceneTimeline.totalShots}</p><p>镜头已验收</p></div>
+                          </div>
+                          {project?.approvedAt && <p className="mt-3 text-[11px] text-emerald-800">人工终审时间：{new Date(project.approvedAt).toLocaleString('zh-CN')}。任何场次、总结、顺序或制作进度变更都会自动撤销终审。</p>}
+                          {!projectReady && <p className="mt-3 text-[11px] text-amber-800">先处理上方各集的“必须修复”和“建议完善”项目，并完成全部镜头验收。</p>}
+                        </div>
+                        <div className="flex shrink-0 flex-wrap gap-2">
+                          <Button variant="outline" onClick={() => void exportProjectPackage()} disabled={busy}>
+                            {isProjectExporting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Download data-icon="inline-start" />}
+                            {project?.approvedAt && projectReady ? '导出最终执行包' : '导出审查草稿'}
+                          </Button>
+                          <Button onClick={() => void updateProjectApproval(!project?.approvedAt)} disabled={busy || (!project?.approvedAt && !projectReady)}>
+                            {isProjectApprovalSaving ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Check data-icon="inline-start" />}
+                            {project?.approvedAt ? '撤销人工终审' : '确认整部项目'}
+                          </Button>
+                        </div>
                       </div>
                     </div>
                   )}

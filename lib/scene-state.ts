@@ -42,6 +42,7 @@ export const DEFAULT_PROJECT_ID = 'default';
 export interface SceneProject {
   id: string;
   name: string;
+  approvedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
