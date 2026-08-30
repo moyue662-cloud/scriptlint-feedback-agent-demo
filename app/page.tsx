@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, Check, ChevronRight, Clipboard, Download,
-  FileText, Film, GitBranch, Loader2, Play, RefreshCcw, ScanSearch, Sparkles, Users,
+  Camera, Clock, FileText, Film, GitBranch, Loader2, Play, RefreshCcw,
+  ScanSearch, Sparkles, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -15,6 +16,7 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
+import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
 
 const sampleScript = `客厅，夜晚。
 林晓发现桌上父亲的辞职通知书，很生气地质问父亲：“你什么时候辞职的？”
@@ -26,6 +28,8 @@ const pipeline = [
   { id: '02', label: '交互节拍', icon: GitBranch },
   { id: '03', label: '状态建模', icon: Users },
   { id: '04', label: '规则检查', icon: ScanSearch },
+  { id: '05', label: '分镜生成', icon: Camera },
+  { id: '06', label: '连续性验证', icon: Film },
 ];
 
 export default function Home() {
@@ -36,6 +40,9 @@ export default function Home() {
   const [isRunning, setIsRunning] = useState(false);
   const [source, setSource] = useState<AnalysisSource>('local');
   const [notice, setNotice] = useState('');
+  const [storyboard, setStoryboard] = useState<StoryboardResult | null>(null);
+  const [isStoryboardRunning, setIsStoryboardRunning] = useState(false);
+  const [storyboardCopied, setStoryboardCopied] = useState(false);
 
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
@@ -47,6 +54,8 @@ export default function Home() {
 
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
+  const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
+  const busy = isRunning || isStoryboardRunning;
 
   async function requestAI(body: Record<string, unknown>) {
     const response = await fetch('/api/analyze', {
@@ -68,10 +77,12 @@ export default function Home() {
       setResult(next);
       setSource('ai');
       setLoopCount(0);
+      setStoryboard(null);
     } catch (error) {
       setResult(analyzeScript(script));
       setSource('local');
       setLoopCount(0);
+      setStoryboard(null);
       setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}，已切换到本地规则结果。`);
     } finally {
       setIsRunning(false);
@@ -89,18 +100,40 @@ export default function Home() {
       setResult(next);
       setSource('ai');
       setLoopCount((current) => current + 1);
+      setStoryboard(null);
     } catch (error) {
       setResult((current) => repairAnalysis(current));
       setSource('local');
       setLoopCount((current) => current + 1);
+      setStoryboard(null);
       setNotice(`${error instanceof Error ? error.message : '智能修复暂时不可用'}，本轮已由本地规则完成。`);
     } finally {
       setIsRunning(false);
     }
   }
 
+  async function generateStoryboard() {
+    if (isStoryboardRunning || !result.beats.length) return;
+    setIsStoryboardRunning(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/storyboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ script, analysis: result }),
+      });
+      const payload = await response.json() as { result?: StoryboardResult; error?: string };
+      if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
+      setStoryboard(payload.result);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '分镜生成暂时不可用，请稍后重试。');
+    } finally {
+      setIsStoryboardRunning(false);
+    }
+  }
+
   function exportResult() {
-    const payload = { sourceScript: script, ...result, exportedAt: new Date().toISOString() };
+    const payload = { sourceScript: script, analysis: result, storyboard, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -114,6 +147,13 @@ export default function Home() {
     await navigator.clipboard.writeText(result.executionPrompt);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  async function copyStoryboardPrompt() {
+    if (!storyboard) return;
+    await navigator.clipboard.writeText(storyboard.modelPrompt);
+    setStoryboardCopied(true);
+    window.setTimeout(() => setStoryboardCopied(false), 1600);
   }
 
   return (
@@ -184,7 +224,7 @@ export default function Home() {
                   <button className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" onClick={() => setScript(sampleScript)}>
                     恢复示例剧本
                   </button>
-                  <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || isRunning} className="px-4">
+                  <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || busy} className="px-4">
                     {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
                     {isRunning ? '智能编译中…' : 'AI 编译这场戏'}
                   </Button>
@@ -195,10 +235,10 @@ export default function Home() {
             <Card className="border-0 ring-border">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2"><GitBranch className="size-4 text-primary" />工作流状态</CardTitle>
-                <CardDescription>第二阶段：大模型结构化编译，并由本地规则提供安全备用。</CardDescription>
+                <CardDescription>第三阶段：从交互结构生成分镜，并验证人物、道具、空间和时间连续性。</CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="grid gap-2 sm:grid-cols-4">
+                <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
                   {pipeline.map((step, index) => {
                     const Icon = step.icon;
                     return (
@@ -231,6 +271,7 @@ export default function Home() {
                     <TabsTrigger value="beats">交互节拍</TabsTrigger>
                     <TabsTrigger value="issues">问题 {activeIssues.length > 0 && <span className="rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">{activeIssues.length}</span>}</TabsTrigger>
                     <TabsTrigger value="prompt">执行Prompt</TabsTrigger>
+                    <TabsTrigger value="storyboard">分镜 {storyboard ? storyboard.shots.length : ''}</TabsTrigger>
                   </TabsList>
                 </div>
               </CardHeader>
@@ -265,7 +306,7 @@ export default function Home() {
                 <CardContent className="py-4">
                   <div className="mb-4 flex items-center justify-between gap-4 rounded-xl bg-[#f8f4ed] p-4">
                     <div><p className="text-sm font-semibold">受控修复循环</p><p className="mt-1 text-xs text-muted-foreground">仅修改已定位的问题，最多运行3轮。</p></div>
-                    <Button onClick={runRepairLoop} disabled={activeIssues.length === 0 || loopCount >= 3 || isRunning}>
+                    <Button onClick={runRepairLoop} disabled={activeIssues.length === 0 || loopCount >= 3 || busy}>
                       {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <RefreshCcw data-icon="inline-start" />}
                       {isRunning ? '修复中…' : '运行修复 Loop'}
                     </Button>
@@ -291,11 +332,81 @@ export default function Home() {
 
               <TabsContent value="prompt" className="m-0">
                 <CardContent className="py-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <div><p className="text-sm font-semibold">模型执行指令</p><p className="text-xs text-muted-foreground">下一阶段可直接发送给大模型或视频分镜模块。</p></div>
-                    <Button variant="outline" onClick={copyPrompt}>{copied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{copied ? '已复制' : '复制'}</Button>
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                    <div><p className="text-sm font-semibold">模型执行指令</p><p className="text-xs text-muted-foreground">可复制交互指令，或继续生成带连续性状态的分镜。</p></div>
+                    <div className="flex gap-2">
+                      <Button variant="outline" onClick={copyPrompt}>{copied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{copied ? '已复制' : '复制'}</Button>
+                      <Button onClick={generateStoryboard} disabled={busy}>
+                        {isStoryboardRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Camera data-icon="inline-start" />}
+                        {isStoryboardRunning ? '生成中…' : storyboard ? '重新生成分镜' : '生成分镜'}
+                      </Button>
+                    </div>
                   </div>
                   <pre className="max-h-[650px] overflow-auto whitespace-pre-wrap rounded-xl bg-[#201d1a] p-5 font-mono text-xs leading-6 text-[#f7f0e5]">{result.executionPrompt}</pre>
+                </CardContent>
+              </TabsContent>
+
+              <TabsContent value="storyboard" className="m-0">
+                <CardContent className="py-4">
+                  {!storyboard ? (
+                    <div className="grid min-h-[520px] place-items-center rounded-xl border border-dashed border-border bg-muted/25 p-8 text-center">
+                      <div className="max-w-md">
+                        <span className="mx-auto mb-4 grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><Camera className="size-5" /></span>
+                        <h3 className="font-semibold">把交互节拍转换成可执行分镜</h3>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">系统会为每个镜头锁定人物站位、视线、道具、空间和时间状态，并自动比较相邻镜头。</p>
+                        <Button className="mt-5" onClick={generateStoryboard} disabled={busy}>
+                          {isStoryboardRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Camera data-icon="inline-start" />}
+                          {isStoryboardRunning ? '正在生成分镜…' : '生成分镜与连续性报告'}
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      <div className="mb-4 grid gap-2 sm:grid-cols-4">
+                        <Metric label="镜头数量" value={String(storyboard.shots.length)} suffix="个" />
+                        <Metric label="预计时长" value={String(storyboard.totalDurationSec)} suffix="秒" />
+                        <Metric label="连续性" value={String(storyboard.continuityScore)} suffix="分" danger={activeContinuityIssues.some((issue) => issue.severity === 'hard')} />
+                        <Metric label="待修问题" value={String(activeContinuityIssues.length)} suffix="项" danger={activeContinuityIssues.length > 0} />
+                      </div>
+
+                      {activeContinuityIssues.length > 0 && (
+                        <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+                          <p className="text-sm font-semibold text-amber-950">连续性报告 · {activeContinuityIssues.length} 项</p>
+                          <div className="mt-2 space-y-2">
+                            {activeContinuityIssues.slice(0, 4).map((issue) => (
+                              <p key={issue.id} className="text-xs leading-5 text-amber-900"><span className="font-semibold">{issue.fromShotId} → {issue.toShotId}：</span>{issue.detail}</p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                        <p className="text-xs text-muted-foreground">开始状态必须承接上一镜头结束状态；有跳切时必须给出原因。</p>
+                        <div className="flex gap-2">
+                          <Button variant="outline" onClick={copyStoryboardPrompt}>{storyboardCopied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{storyboardCopied ? '已复制' : '复制视频Prompt'}</Button>
+                          <Button variant="outline" onClick={generateStoryboard} disabled={busy}><RefreshCcw data-icon="inline-start" />重新生成</Button>
+                        </div>
+                      </div>
+
+                      <div className="max-h-[650px] space-y-3 overflow-y-auto pr-1">
+                        {storyboard.shots.map((shot) => (
+                          <article key={shot.id} className="rounded-xl border border-border bg-card p-4">
+                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2"><Badge className="bg-primary/10 text-primary">{shot.id}</Badge><Badge variant="outline">{shot.beatId}</Badge><span className="text-sm font-semibold">{shot.focus}</span></div>
+                              <span className="flex items-center gap-1 text-xs text-muted-foreground"><Clock className="size-3.5" />{shot.durationSec}秒 · {shot.shotSize} · {shot.cameraAngle} · {shot.cameraMovement}</span>
+                            </div>
+                            <p className="text-sm leading-6"><span className="font-semibold">动作：</span>{shot.action}</p>
+                            {shot.dialogue && <p className="mt-1 text-sm leading-6"><span className="font-semibold">台词：</span>{shot.dialogue}</p>}
+                            <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                              <ShotStateView label="开始状态" state={shot.startState} />
+                              <ShotStateView label="结束状态" state={shot.endState} />
+                            </div>
+                            <div className="mt-3 rounded-lg bg-muted/45 px-3 py-2.5 text-xs leading-5"><span className="font-semibold">视频Prompt：</span>{shot.videoPrompt}</div>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </CardContent>
               </TabsContent>
             </Tabs>
@@ -303,8 +414,8 @@ export default function Home() {
         </section>
 
         <footer className="mt-6 flex flex-col justify-between gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row">
-          <span>智能模式使用结构化模型输出；异常时自动切换本地规则。</span>
-          <span className="flex items-center gap-1.5"><Sparkles className="size-3.5" />DeepSeek Responses API · 受控修复 Loop</span>
+          <span>交互分析、分镜生成与相邻镜头连续性验证已串联。</span>
+          <span className="flex items-center gap-1.5"><Sparkles className="size-3.5" />DeepSeek · 状态锁定 · 连续性规则</span>
         </footer>
       </div>
     </main>
@@ -317,4 +428,16 @@ function Metric({ label, value, suffix, danger = false }: { label: string; value
 
 function BeatField({ label, value }: { label: string; value: string }) {
   return <div><p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">{label}</p><p className="leading-6 text-foreground/90">{value}</p></div>;
+}
+
+function ShotStateView({ label, state }: { label: string; state: ShotState }) {
+  return (
+    <div className="rounded-lg border border-border/80 bg-[#faf7f1] p-3 text-xs leading-5">
+      <p className="mb-1 font-semibold text-foreground">{label}</p>
+      <p><span className="text-muted-foreground">站位：</span>{state.characterPositions}</p>
+      <p><span className="text-muted-foreground">视线：</span>{state.gazeDirection}</p>
+      <p><span className="text-muted-foreground">道具：</span>{state.propState}</p>
+      <p><span className="text-muted-foreground">空间/时间：</span>{state.spaceState} · {state.timeState}</p>
+    </div>
+  );
 }
