@@ -12,6 +12,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import {
@@ -86,6 +87,7 @@ export default function Home() {
   const [scenes, setScenes] = useState<StoredScene[]>([]);
   const [sceneTitle, setSceneTitle] = useState('');
   const [episodeNumber, setEpisodeNumber] = useState(1);
+  const [selectedEpisode, setSelectedEpisode] = useState<number | 'all'>('all');
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
   const [project, setProject] = useState<SceneProject | null>(null);
@@ -209,6 +211,29 @@ export default function Home() {
       productionProgress: totalShots > 0 ? Math.round((acceptedShots / totalShots) * 100) : 0,
     };
   }, [scenes]);
+  const visibleTimeline = useMemo(() => {
+    const visibleScenes = selectedEpisode === 'all'
+      ? sceneTimeline.scenes
+      : sceneTimeline.scenes.filter((scene) => scene.episodeNumber === selectedEpisode);
+    const totalShots = visibleScenes.reduce((total, scene) => total + scene.summary.shotCount, 0);
+    const totalDurationSec = visibleScenes.reduce((total, scene) => total + scene.summary.durationSec, 0);
+    const acceptedShots = visibleScenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0);
+    const episodes = Array.from(new Set(visibleScenes.map((scene) => scene.episodeNumber))).map((episodeNumber) => ({
+      episodeNumber,
+      scenes: visibleScenes.filter((scene) => scene.episodeNumber === episodeNumber),
+    }));
+    return {
+      scenes: visibleScenes,
+      episodes,
+      totalShots,
+      totalDurationSec,
+      productionProgress: totalShots > 0 ? Math.round((acceptedShots / totalShots) * 100) : 0,
+    };
+  }, [sceneTimeline, selectedEpisode]);
+  const episodeOptions = useMemo(
+    () => Array.from(new Set(scenes.map((scene) => scene.episodeNumber))).sort((a, b) => a - b),
+    [scenes],
+  );
   const activeSavedScene = useMemo(
     () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
     [scenes, script],
@@ -975,24 +1000,28 @@ export default function Home() {
                   {scenes.length > 0 && (
                     <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
                       <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
-                        <div>
+                        <div className="min-w-0">
                           <p className="text-sm font-semibold text-indigo-950">场次时间线</p>
                           <p className="mt-1 text-xs leading-5 text-indigo-900">按场次顺序汇总时长、镜头和视频制作状态，帮助检查整部短剧的推进节奏。</p>
                         </div>
+                        <NativeSelect value={String(selectedEpisode)} onChange={(event) => setSelectedEpisode(event.target.value === 'all' ? 'all' : Number(event.target.value))} aria-label="筛选集数" className="w-full lg:w-36">
+                          <NativeSelectOption value="all">全部集数</NativeSelectOption>
+                          {episodeOptions.map((episode) => <NativeSelectOption key={episode} value={String(episode)}>第 {episode} 集</NativeSelectOption>)}
+                        </NativeSelect>
                         <div className="grid grid-cols-3 gap-2 text-center text-xs text-indigo-900">
-                          <div className="rounded-lg bg-white/70 px-3 py-2"><p className="text-lg font-semibold tabular-nums">{sceneTimeline.scenes.length}</p><p>场次</p></div>
-                          <div className="rounded-lg bg-white/70 px-3 py-2"><p className="text-lg font-semibold tabular-nums">{sceneTimeline.totalShots}</p><p>镜头</p></div>
-                          <div className="rounded-lg bg-white/70 px-3 py-2"><p className="text-lg font-semibold tabular-nums">{sceneTimeline.totalDurationSec}秒</p><p>总时长</p></div>
+                          <div className="rounded-lg bg-white/70 px-3 py-2"><p className="text-lg font-semibold tabular-nums">{visibleTimeline.scenes.length}</p><p>场次</p></div>
+                          <div className="rounded-lg bg-white/70 px-3 py-2"><p className="text-lg font-semibold tabular-nums">{visibleTimeline.totalShots}</p><p>镜头</p></div>
+                          <div className="rounded-lg bg-white/70 px-3 py-2"><p className="text-lg font-semibold tabular-nums">{visibleTimeline.totalDurationSec}秒</p><p>总时长</p></div>
                         </div>
                       </div>
                       <div className="mt-4 flex items-center gap-3">
-                        <Progress value={sceneTimeline.productionProgress} className="h-2 flex-1 bg-indigo-100" />
-                        <span className="min-w-12 text-right text-xs font-semibold tabular-nums text-indigo-900">{sceneTimeline.productionProgress}%</span>
+                        <Progress value={visibleTimeline.productionProgress} className="h-2 flex-1 bg-indigo-100" />
+                        <span className="min-w-12 text-right text-xs font-semibold tabular-nums text-indigo-900">{visibleTimeline.productionProgress}%</span>
                       </div>
                       <div className="mt-4 space-y-4">
-                        {sceneTimeline.episodes.map((episode) => (
+                        {visibleTimeline.episodes.map((episode) => (
                           <section key={episode.episodeNumber} className="rounded-lg border border-indigo-100 bg-white/55 p-3">
-                            <div className="mb-3 flex items-center justify-between gap-2"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场</p><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
+                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场</p><p className="mt-1 text-[11px] text-indigo-700">{episode.scenes.reduce((total, scene) => total + scene.summary.durationSec, 0)}秒 · {episode.scenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0)}项待修 · {episode.scenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0)}/{episode.scenes.reduce((total, scene) => total + scene.summary.shotCount, 0)}镜头已验收</p></div><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
                             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                               {episode.scenes.map((scene, index) => (
                                 <div key={scene.id} className="relative rounded-lg border border-indigo-100 bg-white/85 p-3">
