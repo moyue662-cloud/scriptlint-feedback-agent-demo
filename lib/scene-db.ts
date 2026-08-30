@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 
 import { createProjectsTableSql, createSceneStatesTableSql } from '@/db/schema';
-import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
+import { buildSceneProductionSummary, DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type {
   DeliveryShotStatus, DeliveryTrackingState, SceneProject,
   SceneSnapshot, StoredScene, StoredSceneDetail,
@@ -90,6 +90,8 @@ function normalizeDeliveryTracking(value: unknown, shotIds?: Set<string>): Deliv
 }
 
 function toStoredScene(row: SceneRow): StoredScene {
+  const deliveryTracking = normalizeDeliveryTracking(row.delivery_tracking_json ? JSON.parse(row.delivery_tracking_json) : null);
+  const storyboard = row.storyboard_json ? JSON.parse(row.storyboard_json) as StoryboardResult : null;
   return {
     id: row.id,
     projectId: row.project_id || DEFAULT_PROJECT_ID,
@@ -97,7 +99,8 @@ function toStoredScene(row: SceneRow): StoredScene {
     title: row.title,
     script: row.script,
     snapshot: JSON.parse(row.snapshot_json) as SceneSnapshot,
-    deliveryTracking: normalizeDeliveryTracking(row.delivery_tracking_json ? JSON.parse(row.delivery_tracking_json) : null),
+    deliveryTracking,
+    summary: buildSceneProductionSummary(storyboard, deliveryTracking),
     createdAt: row.created_at,
   };
 }
@@ -133,7 +136,7 @@ export async function updateProjectName(name: string, id = DEFAULT_PROJECT_ID) {
 export async function listScenes(projectId = DEFAULT_PROJECT_ID, limit = 30) {
   await ensureSchema();
   const result = await database().prepare(
-    `SELECT id, project_id, scene_number, title, script, snapshot_json, delivery_tracking_json, created_at
+    `SELECT id, project_id, scene_number, title, script, storyboard_json, snapshot_json, delivery_tracking_json, created_at
      FROM scene_states WHERE project_id = ? ORDER BY scene_number DESC LIMIT ?`,
   ).bind(projectId, Math.max(1, Math.min(100, limit))).all<SceneRow>();
   return result.results.map(toStoredScene);
@@ -142,7 +145,7 @@ export async function listScenes(projectId = DEFAULT_PROJECT_ID, limit = 30) {
 export async function getLatestScene(projectId = DEFAULT_PROJECT_ID) {
   await ensureSchema();
   const row = await database().prepare(
-    `SELECT id, project_id, scene_number, title, script, snapshot_json, delivery_tracking_json, created_at
+    `SELECT id, project_id, scene_number, title, script, storyboard_json, snapshot_json, delivery_tracking_json, created_at
      FROM scene_states WHERE project_id = ? ORDER BY scene_number DESC LIMIT 1`,
   ).bind(projectId).first<SceneRow>();
   return row ? toStoredScene(row) : null;

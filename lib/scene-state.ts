@@ -25,6 +25,18 @@ export interface DeliveryTrackingState {
   updatedAt: string | null;
 }
 
+export type SceneProductionStatus = 'ready' | 'needs-review' | 'in-production' | 'completed';
+
+export interface SceneProductionSummary {
+  shotCount: number;
+  durationSec: number;
+  continuityIssueCount: number;
+  submittedShotCount: number;
+  acceptedShotCount: number;
+  productionProgress: number;
+  status: SceneProductionStatus;
+}
+
 export const DEFAULT_PROJECT_ID = 'default';
 
 export interface SceneProject {
@@ -42,12 +54,45 @@ export interface StoredScene {
   script: string;
   snapshot: SceneSnapshot;
   deliveryTracking: DeliveryTrackingState;
+  summary: SceneProductionSummary;
   createdAt: string;
 }
 
 export interface StoredSceneDetail extends StoredScene {
   analysis: AnalysisResult;
   storyboard: StoryboardResult;
+}
+
+export function buildSceneProductionSummary(
+  storyboard: StoryboardResult | null,
+  deliveryTracking: DeliveryTrackingState,
+): SceneProductionSummary {
+  const shots = storyboard?.shots ?? [];
+  const shotCount = shots.length;
+  const submittedShotCount = shots.filter((shot) => {
+    const status = deliveryTracking.statuses[shot.id];
+    return status === 'submitted' || status === 'accepted';
+  }).length;
+  const acceptedShotCount = shots.filter((shot) => deliveryTracking.statuses[shot.id] === 'accepted').length;
+  const continuityIssueCount = storyboard?.issues.filter((issue) => !issue.resolved).length ?? 0;
+  const productionProgress = shotCount > 0 ? Math.round((acceptedShotCount / shotCount) * 100) : 0;
+  const status: SceneProductionStatus = continuityIssueCount > 0
+    ? 'needs-review'
+    : shotCount > 0 && acceptedShotCount === shotCount
+      ? 'completed'
+      : submittedShotCount > 0
+        ? 'in-production'
+        : 'ready';
+
+  return {
+    shotCount,
+    durationSec: shots.reduce((total, shot) => total + Math.max(0, Number(shot.durationSec) || 0), 0),
+    continuityIssueCount,
+    submittedShotCount,
+    acceptedShotCount,
+    productionProgress,
+    status,
+  };
 }
 
 export function buildSceneSnapshot(analysis: AnalysisResult, storyboard: StoryboardResult): SceneSnapshot {
