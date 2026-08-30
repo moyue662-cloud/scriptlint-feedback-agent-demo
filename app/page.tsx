@@ -104,7 +104,8 @@ export default function Home() {
     })
     : null, [storyboard, deliveryAspectRatio]);
   const deliveryValidation = useMemo(() => deliveryPackage ? validateVideoDeliveryPackage(deliveryPackage) : null, [deliveryPackage]);
-  const canDeliver = allShotsReviewed && deliveryValidation?.valid === true;
+  const deliveryHasHardIssues = hardIssues.length > 0 || hasHardStoryboardIssues;
+  const canDeliver = allShotsReviewed && !deliveryHasHardIssues && deliveryValidation?.valid === true;
   const deliveryTracking = useMemo(() => {
     const shots = deliveryPackage?.shots ?? [];
     const submittedCount = shots.filter((shot) => deliveryShotStatuses[shot.id] === 'submitted' || deliveryShotStatuses[shot.id] === 'accepted').length;
@@ -282,9 +283,9 @@ export default function Home() {
     const payload = {
       sourceScript: script, analysis: result, storyboard, sceneHistory: scenes,
       humanReview: { approved: allShotsReviewed, reviewedShotIds, reviewedAt: allShotsReviewed ? new Date().toISOString() : null },
-      videoDeliveryPackage: deliveryPackage,
+      videoDeliveryPackage: canDeliver ? deliveryPackage : null,
       videoDeliveryValidation: deliveryValidation,
-      deliveryTracking: { ...deliveryTracking, statuses: deliveryShotStatuses },
+      deliveryTracking: canDeliver ? { ...deliveryTracking, statuses: deliveryShotStatuses } : null,
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -712,7 +713,7 @@ export default function Home() {
                           <div className="flex flex-wrap gap-2"><Button onClick={copyDeliveryPackage} disabled={!canDeliver}>{deliveryCopied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{deliveryCopied ? '已复制' : '复制交付包'}</Button><Button variant="outline" onClick={downloadDeliveryPackage} disabled={!canDeliver}><Download data-icon="inline-start" />下载JSON</Button></div>
                         </div>
                       </div>
-                      {deliveryValidation?.valid ? (
+                      {deliveryValidation?.valid && !deliveryHasHardIssues ? (
                         <div className="mb-4 flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 text-xs leading-5 text-emerald-900">
                           <Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />
                           <div><p className="font-semibold">交付前校验通过 · video-delivery/v1</p><p className="mt-1">镜头顺序、时长、Prompt、台词和连续性锁定字段完整，可交给视频生成工具。</p></div>
@@ -720,6 +721,7 @@ export default function Home() {
                       ) : (
                         <div className="mb-4 rounded-xl border border-red-200 bg-red-50/70 p-4 text-xs leading-5 text-red-900">
                           <p className="font-semibold">交付前校验未通过</p>
+                          {deliveryHasHardIssues && <p className="mt-1">存在未解决的剧本或分镜硬问题，请先回到对应页面处理。</p>}
                           <div className="mt-1 space-y-1">{deliveryValidation?.issues.slice(0, 5).map((issue) => <p key={`${issue.code}-${issue.shotId ?? 'global'}`}>· {issue.shotId ? `${issue.shotId}：` : ''}{issue.message}</p>)}</div>
                         </div>
                       )}
