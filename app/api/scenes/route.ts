@@ -1,5 +1,5 @@
 import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '@/lib/scene-state';
-import { getLatestScene, getSceneById, listScenes, moveScene, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
+import { getLatestScene, getSceneById, listScenes, moveScene, moveSceneBefore, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import type { StoryboardResult } from '@/lib/storyboard-engine';
 
@@ -68,13 +68,20 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const body = await request.json() as { sceneId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' };
+    const body = await request.json() as { sceneId?: string; targetSceneId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' | 'move-before' };
     const sceneId = body.sceneId?.trim() ?? '';
     if (!sceneId) {
       return Response.json({ error: '缺少场次或制作进度信息。' }, { status: 400 });
     }
     if (body.action === 'move-up' || body.action === 'move-down') {
       const moved = await moveScene({ sceneId, direction: body.action === 'move-up' ? 'up' : 'down' });
+      if (!moved) return Response.json({ error: '找不到要调整的场次。' }, { status: 404 });
+      return Response.json({ moved: moved.moved });
+    }
+    if (body.action === 'move-before') {
+      const targetSceneId = body.targetSceneId?.trim() ?? '';
+      if (!targetSceneId) return Response.json({ error: '缺少目标场次。' }, { status: 400 });
+      const moved = await moveSceneBefore({ sceneId, targetSceneId });
       if (!moved) return Response.json({ error: '找不到要调整的场次。' }, { status: 404 });
       return Response.json({ moved: moved.moved });
     }

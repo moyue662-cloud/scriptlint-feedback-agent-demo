@@ -268,6 +268,43 @@ export async function moveScene(input: { sceneId: string; direction: 'up' | 'dow
   return { moved: true };
 }
 
+export async function moveSceneBefore(input: { sceneId: string; targetSceneId: string }) {
+  await ensureSchema();
+  const db = database();
+  const current = await db.prepare(
+    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ?',
+  ).bind(input.sceneId).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
+  const target = await db.prepare(
+    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ?',
+  ).bind(input.targetSceneId).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
+  if (!current || !target) return null;
+  if (current.id === target.id || current.project_id !== target.project_id || current.episode_number !== target.episode_number) {
+    return { moved: false };
+  }
+
+  const rows = await db.prepare(
+    `SELECT id, scene_order FROM scene_states
+     WHERE project_id = ? AND episode_number = ?
+     ORDER BY scene_order ASC, scene_number ASC`,
+  ).bind(current.project_id, current.episode_number).all<{ id: string; scene_order: number }>();
+  const ids = rows.results.map((row) => row.id);
+  const currentIndex = ids.indexOf(current.id);
+  const targetIndex = ids.indexOf(target.id);
+  if (currentIndex < 0 || targetIndex < 0) return { moved: false };
+
+  ids.splice(currentIndex, 1);
+  ids.splice(ids.indexOf(target.id), 0, current.id);
+  const orders = rows.results.map((row) => row.scene_order).sort((a, b) => a - b);
+  const temporaryBase = Math.max(...orders, current.scene_order, target.scene_order) + 1000000;
+  await db.batch(ids.map((id, index) => db.prepare(
+    'UPDATE scene_states SET scene_order = ? WHERE id = ?',
+  ).bind(temporaryBase + index, id)));
+  await db.batch(ids.map((id, index) => db.prepare(
+    'UPDATE scene_states SET scene_order = ? WHERE id = ?',
+  ).bind(orders[index], id)));
+  return { moved: true };
+}
+
 export async function updateSceneDeliveryTracking(input: {
   sceneId: string;
   tracking: unknown;

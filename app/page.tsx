@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Check, ChevronRight, Clipboard, Download,
-  Camera, Clock, Database, FileText, Film, GitBranch, Loader2, Play,
+  Camera, Clock, Database, FileText, Film, GitBranch, GripVertical, Loader2, Play,
   PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Users,
 } from 'lucide-react';
 
@@ -91,6 +91,8 @@ export default function Home() {
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
   const [isSceneReordering, setIsSceneReordering] = useState(false);
+  const [draggingSceneId, setDraggingSceneId] = useState<string | null>(null);
+  const [dragOverSceneId, setDragOverSceneId] = useState<string | null>(null);
   const [project, setProject] = useState<SceneProject | null>(null);
   const [projectName, setProjectName] = useState('');
   const [isProjectSaving, setIsProjectSaving] = useState(false);
@@ -148,7 +150,7 @@ export default function Home() {
       setDeliveryCopied(false);
       setSceneTitle(detail.title);
       setEpisodeNumber(detail.episodeNumber);
-      setPreviousSceneNumber(scenes.find((item) => item.sceneOrder === detail.sceneOrder - 1)?.sceneOrder ?? null);
+      setPreviousSceneNumber(scenes.find((item) => item.episodeNumber === detail.episodeNumber && item.sceneOrder < detail.sceneOrder)?.sceneOrder ?? null);
       setNotice(`已载入第 ${detail.episodeNumber} 集第 ${detail.sceneOrder} 场，可继续修改或查看制作进度。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '场次载入失败，请稍后重试。');
@@ -574,6 +576,30 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : '场次顺序调整失败，请稍后重试。');
     } finally {
       setIsSceneReordering(false);
+    }
+  }
+
+  async function moveSceneBefore(sceneId: string, targetSceneId: string) {
+    if (busy || sceneId === targetSceneId) return;
+    setIsSceneReordering(true);
+    try {
+      const response = await fetch('/api/scenes', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneId, targetSceneId, action: 'move-before' }),
+      });
+      const payload = await response.json() as { moved?: boolean; error?: string };
+      if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
+      if (payload.moved) {
+        await loadScenes();
+        setNotice('场次顺序已调整，时间线和下一场继承关系已更新。');
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '场次顺序调整失败，请稍后重试。');
+    } finally {
+      setIsSceneReordering(false);
+      setDraggingSceneId(null);
+      setDragOverSceneId(null);
     }
   }
 
@@ -1031,6 +1057,7 @@ export default function Home() {
                         <div className="min-w-0">
                           <p className="text-sm font-semibold text-indigo-950">场次时间线</p>
                           <p className="mt-1 text-xs leading-5 text-indigo-900">按场次顺序汇总时长、镜头和视频制作状态，帮助检查整部短剧的推进节奏。</p>
+                          <p className="mt-1 flex items-center gap-1 text-[11px] text-indigo-700"><GripVertical className="size-3" />拖拽场次卡片可放到另一场之前，也可用右下角箭头调整。</p>
                         </div>
                         <NativeSelect value={String(selectedEpisode)} onChange={(event) => setSelectedEpisode(event.target.value === 'all' ? 'all' : Number(event.target.value))} aria-label="筛选集数" className="w-full lg:w-36">
                           <NativeSelectOption value="all">全部集数</NativeSelectOption>
@@ -1052,7 +1079,35 @@ export default function Home() {
                             <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场</p><p className="mt-1 text-[11px] text-indigo-700">{episode.scenes.reduce((total, scene) => total + scene.summary.durationSec, 0)}秒 · {episode.scenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0)}项待修 · {episode.scenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0)}/{episode.scenes.reduce((total, scene) => total + scene.summary.shotCount, 0)}镜头已验收</p></div><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
                             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                               {episode.scenes.map((scene, index) => (
-                                <div key={scene.id} className="relative rounded-lg border border-indigo-100 bg-white/85 p-3">
+                                <div
+                                  key={scene.id}
+                                  draggable={!busy}
+                                  onDragStart={(event) => {
+                                    setDraggingSceneId(scene.id);
+                                    event.dataTransfer.effectAllowed = 'move';
+                                    event.dataTransfer.setData('text/plain', scene.id);
+                                  }}
+                                  onDragOver={(event) => {
+                                    if (draggingSceneId && draggingSceneId !== scene.id) {
+                                      event.preventDefault();
+                                      event.dataTransfer.dropEffect = 'move';
+                                      setDragOverSceneId(scene.id);
+                                    }
+                                  }}
+                                  onDragLeave={() => {
+                                    if (dragOverSceneId === scene.id) setDragOverSceneId(null);
+                                  }}
+                                  onDrop={(event) => {
+                                    event.preventDefault();
+                                    const sourceId = event.dataTransfer.getData('text/plain') || draggingSceneId;
+                                    if (sourceId && sourceId !== scene.id) void moveSceneBefore(sourceId, scene.id);
+                                  }}
+                                  onDragEnd={() => {
+                                    setDraggingSceneId(null);
+                                    setDragOverSceneId(null);
+                                  }}
+                                  className={`relative rounded-lg border bg-white/85 p-3 transition ${dragOverSceneId === scene.id ? 'border-indigo-500 ring-2 ring-indigo-200' : 'border-indigo-100'} ${draggingSceneId === scene.id ? 'opacity-60' : ''}`}
+                                >
                                   {index < episode.scenes.length - 1 && <span className="absolute -right-3 top-1/2 hidden h-px w-3 bg-indigo-200 xl:block" aria-hidden="true" />}
                                   <div className="flex items-start justify-between gap-2">
                                     <div className="flex min-w-0 items-center gap-2"><span className="grid size-6 shrink-0 place-items-center rounded-full bg-indigo-100 text-xs font-semibold text-indigo-800">{scene.sceneOrder}</span><p className="line-clamp-1 text-sm font-semibold text-indigo-950">{scene.title}</p></div>
