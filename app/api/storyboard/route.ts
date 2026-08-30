@@ -1,6 +1,9 @@
 import type { AnalysisResult } from '@/lib/script-engine';
 import {
+  addStoryboardRepairHistory,
+  enforceStoryboardRepairScope,
   finalizeStoryboard,
+  getStoryboardRepairScope,
   type StoryboardResult,
 } from '@/lib/storyboard-engine';
 
@@ -83,6 +86,15 @@ const instructions = `你是短剧分镜编译器。输入包含原始剧本和�
 8. modelPrompt 是将全部镜头发送给后续视频生成模型的总指令，强调镜头顺序和状态锁定。
 9. 仅输出合法 JSON；禁止 Markdown、注释、未加双引号的键和尾随逗号。`;
 
+const repairInstructions = `${instructions}
+
+当前任务是“受控分镜修复”，不是重新创作：
+1. 只修改 editableShotIds 中的镜头及 editableBeatIds 对应的必要新增镜头。
+2. lockedShotIds 中的镜头必须原样返回，所有字段、顺序和编号都不得改变或删除。
+3. 逐项解决 activeIssues，并保证修改后镜头与前后锁定镜头的状态能够衔接。
+4. 不得改变已经确定的剧情事实、人物关系、台词信息和节拍顺序。
+5. 若一个问题无法在授权范围内安全解决，保留原镜头并继续在 issues 中说明，不得扩大修改范围。`;
+
 function getOutputText(payload: Record<string, unknown>) {
   const output = Array.isArray(payload.output) ? payload.output : [];
   for (const item of output) {
@@ -119,20 +131,38 @@ function parseOutput(text: string) {
 
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { script?: string; analysis?: AnalysisResult };
+    const body = await request.json() as {
+      script?: string;
+      analysis?: AnalysisResult;
+      mode?: 'generate' | 'repair';
+      current?: StoryboardResult;
+      loopCount?: number;
+    };
     if (!body.script?.trim() || !body.analysis?.beats?.length) {
       return Response.json({ error: '请先完成剧本交互分析。' }, { status: 400 });
     }
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) return Response.json({ error: '模型服务尚未配置。' }, { status: 503 });
 
+    const repairMode = body.mode === 'repair';
+    if (repairMode && (!body.current?.shots?.length || !body.current.issues.some((issue) => !issue.resolved))) {
+      return Response.json({ error: '当前没有需要修复的分镜问题。' }, { status: 400 });
+    }
+    if (repairMode && (body.loopCount ?? 0) > 3) {
+      return Response.json({ error: '分镜修复最多运行3轮。' }, { status: 400 });
+    }
+    const scope = repairMode && body.current ? getStoryboardRepairScope(body.current) : null;
+    const input = repairMode && body.current && scope
+      ? `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}\n\n当前分镜：\n${JSON.stringify(body.current)}\n\nactiveIssues：\n${JSON.stringify(body.current.issues.filter((issue) => !issue.resolved))}\n\n修复范围：\n${JSON.stringify(scope)}`
+      : `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}`;
+
     const modelResponse = await fetch(API_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: MODEL,
-        instructions,
-        input: `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}`,
+        instructions: repairMode ? repairInstructions : instructions,
+        input,
         reasoning: { effort: 'none' },
         text: { format: { type: 'json_schema', name: 'short_drama_storyboard', schema: storyboardSchema } },
         max_output_tokens: 12000,
@@ -145,8 +175,23 @@ export async function POST(request: Request) {
     }
     const outputText = getOutputText(payload);
     if (!outputText) return Response.json({ error: '模型没有返回可用分镜。' }, { status: 502 });
-    const result = finalizeStoryboard(parseOutput(outputText), body.analysis);
-    return Response.json({ result, meta: { source: 'ai', provider: 'deepseek', model: MODEL } });
+    const parsed = parseOutput(outputText);
+    const scoped = repairMode && body.current && scope
+      ? enforceStoryboardRepairScope(body.current, parsed, scope)
+      : parsed;
+    const finalized = finalizeStoryboard(scoped, body.analysis);
+    const result = repairMode && body.current
+      ? addStoryboardRepairHistory(body.current, finalized)
+      : finalized;
+    return Response.json({
+      result,
+      meta: {
+        source: 'ai', provider: 'deepseek', model: MODEL,
+        mode: repairMode ? 'repair' : 'generate',
+        editableShotIds: scope?.editableShotIds ?? [],
+        lockedShotCount: scope?.lockedShotIds.length ?? 0,
+      },
+    });
   } catch (error) {
     console.error('Storyboard generation failed', error instanceof Error ? error.message : 'unknown error');
     return Response.json({ error: '分镜生成失败，请稍后重试。' }, { status: 500 });

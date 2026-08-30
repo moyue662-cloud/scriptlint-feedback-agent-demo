@@ -43,6 +43,7 @@ export default function Home() {
   const [storyboard, setStoryboard] = useState<StoryboardResult | null>(null);
   const [isStoryboardRunning, setIsStoryboardRunning] = useState(false);
   const [storyboardCopied, setStoryboardCopied] = useState(false);
+  const [storyboardLoopCount, setStoryboardLoopCount] = useState(0);
 
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
@@ -78,11 +79,13 @@ export default function Home() {
       setSource('ai');
       setLoopCount(0);
       setStoryboard(null);
+      setStoryboardLoopCount(0);
     } catch (error) {
       setResult(analyzeScript(script));
       setSource('local');
       setLoopCount(0);
       setStoryboard(null);
+      setStoryboardLoopCount(0);
       setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}，已切换到本地规则结果。`);
     } finally {
       setIsRunning(false);
@@ -101,11 +104,13 @@ export default function Home() {
       setSource('ai');
       setLoopCount((current) => current + 1);
       setStoryboard(null);
+      setStoryboardLoopCount(0);
     } catch (error) {
       setResult((current) => repairAnalysis(current));
       setSource('local');
       setLoopCount((current) => current + 1);
       setStoryboard(null);
+      setStoryboardLoopCount(0);
       setNotice(`${error instanceof Error ? error.message : '智能修复暂时不可用'}，本轮已由本地规则完成。`);
     } finally {
       setIsRunning(false);
@@ -125,8 +130,33 @@ export default function Home() {
       const payload = await response.json() as { result?: StoryboardResult; error?: string };
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
       setStoryboard(payload.result);
+      setStoryboardLoopCount(0);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '分镜生成暂时不可用，请稍后重试。');
+    } finally {
+      setIsStoryboardRunning(false);
+    }
+  }
+
+  async function repairStoryboardLoop() {
+    if (!storyboard || isStoryboardRunning || activeContinuityIssues.length === 0 || storyboardLoopCount >= 3) return;
+    setIsStoryboardRunning(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/storyboard', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          script, analysis: result, mode: 'repair', current: storyboard,
+          loopCount: storyboardLoopCount + 1,
+        }),
+      });
+      const payload = await response.json() as { result?: StoryboardResult; error?: string };
+      if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
+      setStoryboard(payload.result);
+      setStoryboardLoopCount((current) => current + 1);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '分镜修复暂时不可用，请稍后重试。');
     } finally {
       setIsStoryboardRunning(false);
     }
@@ -235,7 +265,7 @@ export default function Home() {
             <Card className="border-0 ring-border">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2"><GitBranch className="size-4 text-primary" />工作流状态</CardTitle>
-                <CardDescription>第三阶段：从交互结构生成分镜，并验证人物、道具、空间和时间连续性。</CardDescription>
+                <CardDescription>第四阶段：定位分镜问题，锁定正确镜头，并在有限范围内循环修复。</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
@@ -369,12 +399,18 @@ export default function Home() {
                         <Metric label="待修问题" value={String(activeContinuityIssues.length)} suffix="项" danger={activeContinuityIssues.length > 0} />
                       </div>
 
-                      {activeContinuityIssues.length > 0 && (
+                      {storyboard.issues.length > 0 && (
                         <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50/60 p-4">
-                          <p className="text-sm font-semibold text-amber-950">连续性报告 · {activeContinuityIssues.length} 项</p>
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="text-sm font-semibold text-amber-950">连续性报告 · 待修 {activeContinuityIssues.length} 项</p>
+                            <span className="text-xs tabular-nums text-amber-900">分镜 Loop {storyboardLoopCount}/3</span>
+                          </div>
                           <div className="mt-2 space-y-2">
-                            {activeContinuityIssues.slice(0, 4).map((issue) => (
-                              <p key={issue.id} className="text-xs leading-5 text-amber-900"><span className="font-semibold">{issue.fromShotId} → {issue.toShotId}：</span>{issue.detail}</p>
+                            {storyboard.issues.slice(0, 6).map((issue) => (
+                              <p key={`${issue.id}-${issue.type}-${issue.fromShotId}-${issue.toShotId}`} className={`text-xs leading-5 ${issue.resolved ? 'text-emerald-800' : 'text-amber-900'}`}>
+                                <span className="font-semibold">{issue.fromShotId} → {issue.toShotId}：</span>{issue.detail}
+                                {issue.resolved && <Badge className="ml-2 bg-emerald-600">已修复</Badge>}
+                              </p>
                             ))}
                           </div>
                         </div>
@@ -384,6 +420,10 @@ export default function Home() {
                         <p className="text-xs text-muted-foreground">开始状态必须承接上一镜头结束状态；有跳切时必须给出原因。</p>
                         <div className="flex gap-2">
                           <Button variant="outline" onClick={copyStoryboardPrompt}>{storyboardCopied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{storyboardCopied ? '已复制' : '复制视频Prompt'}</Button>
+                          <Button onClick={repairStoryboardLoop} disabled={busy || activeContinuityIssues.length === 0 || storyboardLoopCount >= 3}>
+                            {isStoryboardRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <RefreshCcw data-icon="inline-start" />}
+                            {isStoryboardRunning ? '修复中…' : activeContinuityIssues.length === 0 ? '无需修复' : '受控修复 Loop'}
+                          </Button>
                           <Button variant="outline" onClick={generateStoryboard} disabled={busy}><RefreshCcw data-icon="inline-start" />重新生成</Button>
                         </div>
                       </div>
@@ -414,7 +454,7 @@ export default function Home() {
         </section>
 
         <footer className="mt-6 flex flex-col justify-between gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row">
-          <span>交互分析、分镜生成与相邻镜头连续性验证已串联。</span>
+          <span>交互分析、分镜生成、连续性验证与受控修复 Loop 已串联。</span>
           <span className="flex items-center gap-1.5"><Sparkles className="size-3.5" />DeepSeek · 状态锁定 · 连续性规则</span>
         </footer>
       </div>

@@ -56,6 +56,12 @@ export interface StoryboardResult {
   generatedAt: string;
 }
 
+export interface StoryboardRepairScope {
+  editableShotIds: string[];
+  lockedShotIds: string[];
+  editableBeatIds: string[];
+}
+
 const stateChecks: Array<{
   key: keyof ShotState;
   type: ContinuityIssueType;
@@ -68,6 +74,78 @@ const stateChecks: Array<{
   { key: 'spaceState', type: 'space_state', label: '空间关系', severity: 'hard' },
   { key: 'timeState', type: 'time_state', label: '时间状态', severity: 'hard' },
 ];
+
+export function getStoryboardRepairScope(current: StoryboardResult): StoryboardRepairScope {
+  const activeIssues = current.issues.filter((issue) => !issue.resolved);
+  const shotIndex = new Map(current.shots.map((shot, index) => [shot.id, index]));
+  const editableIndexes = new Set<number>();
+  const editableBeatIds = new Set<string>();
+
+  activeIssues.forEach((issue) => {
+    [issue.fromShotId, issue.toShotId].forEach((id) => {
+      const index = shotIndex.get(id);
+      if (index === undefined) {
+        if (issue.type === 'beat_coverage') editableBeatIds.add(id);
+        return;
+      }
+      for (let neighbor = Math.max(0, index - 1); neighbor <= Math.min(current.shots.length - 1, index + 1); neighbor += 1) {
+        editableIndexes.add(neighbor);
+        editableBeatIds.add(current.shots[neighbor].beatId);
+      }
+    });
+  });
+
+  return {
+    editableShotIds: current.shots.filter((_, index) => editableIndexes.has(index)).map((shot) => shot.id),
+    lockedShotIds: current.shots.filter((_, index) => !editableIndexes.has(index)).map((shot) => shot.id),
+    editableBeatIds: [...editableBeatIds],
+  };
+}
+
+export function enforceStoryboardRepairScope(
+  current: StoryboardResult,
+  candidate: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>,
+  scope: StoryboardRepairScope,
+) {
+  const editableIds = new Set(scope.editableShotIds);
+  const editableBeatIds = new Set(scope.editableBeatIds);
+  const currentIds = new Set(current.shots.map((shot) => shot.id));
+  const candidateById = new Map(candidate.shots.map((shot) => [shot.id, shot]));
+  const extraByBeat = new Map<string, StoryboardShot[]>();
+
+  candidate.shots.forEach((shot) => {
+    if (currentIds.has(shot.id) || !editableBeatIds.has(shot.beatId)) return;
+    const extras = extraByBeat.get(shot.beatId) ?? [];
+    extras.push(shot);
+    extraByBeat.set(shot.beatId, extras);
+  });
+
+  const shots: StoryboardShot[] = [];
+  current.shots.forEach((shot, index) => {
+    shots.push(editableIds.has(shot.id) ? (candidateById.get(shot.id) ?? shot) : shot);
+    const isLastShotForBeat = current.shots[index + 1]?.beatId !== shot.beatId;
+    if (isLastShotForBeat && editableBeatIds.has(shot.beatId)) {
+      shots.push(...(extraByBeat.get(shot.beatId) ?? []));
+      extraByBeat.delete(shot.beatId);
+    }
+  });
+  extraByBeat.forEach((extras) => shots.push(...extras));
+
+  return { ...candidate, shots };
+}
+
+export function addStoryboardRepairHistory(current: StoryboardResult, repaired: StoryboardResult): StoryboardResult {
+  const activeKeys = new Set(
+    repaired.issues.filter((issue) => !issue.resolved)
+      .map((issue) => `${issue.type}|${issue.fromShotId}|${issue.toShotId}`),
+  );
+  const resolvedHistory = current.issues
+    .filter((issue) => !issue.resolved)
+    .filter((issue) => !activeKeys.has(`${issue.type}|${issue.fromShotId}|${issue.toShotId}`))
+    .map((issue) => ({ ...issue, resolved: true }));
+
+  return { ...repaired, issues: [...resolvedHistory, ...repaired.issues] };
+}
 
 export function finalizeStoryboard(
   raw: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>,
