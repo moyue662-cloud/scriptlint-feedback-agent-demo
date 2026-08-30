@@ -17,7 +17,7 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
-import type { DeliveryShotStatus, StoredScene } from '@/lib/scene-state';
+import type { DeliveryShotStatus, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
 import {
   buildVideoDeliveryPackage, validateVideoDeliveryPackage, videoDeliveryToMarkdown,
@@ -60,6 +60,7 @@ export default function Home() {
   const [scenes, setScenes] = useState<StoredScene[]>([]);
   const [sceneTitle, setSceneTitle] = useState('');
   const [isSceneSaving, setIsSceneSaving] = useState(false);
+  const [isSceneLoading, setIsSceneLoading] = useState(false);
   const [previousSceneNumber, setPreviousSceneNumber] = useState<number | null>(null);
   const [reviewedShotIds, setReviewedShotIds] = useState<string[]>([]);
   const [deliveryAspectRatio, setDeliveryAspectRatio] = useState<DeliveryAspectRatio>('9:16');
@@ -77,6 +78,35 @@ export default function Home() {
     }
   }
 
+  async function loadSavedScene(scene: StoredScene) {
+    if (busy || isSceneLoading) return;
+    setIsSceneLoading(true);
+    setNotice('');
+    try {
+      const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}`);
+      const payload = await response.json() as { scene?: StoredSceneDetail; error?: string };
+      if (!response.ok || !payload.scene) throw new Error(payload.error || '场次载入失败');
+      const detail = payload.scene;
+      setScript(detail.script);
+      window.localStorage.setItem('scene-flow-script', detail.script);
+      setResult(detail.analysis);
+      setSource('saved');
+      setLoopCount(0);
+      setStoryboard(detail.storyboard);
+      setStoryboardLoopCount(0);
+      setReviewedShotIds(detail.storyboard.shots.map((shot) => shot.id));
+      setDeliveryShotStatuses(detail.deliveryTracking.statuses);
+      setDeliveryCopied(false);
+      setSceneTitle(detail.title);
+      setPreviousSceneNumber(scenes.find((item) => item.sceneNumber === detail.sceneNumber - 1)?.sceneNumber ?? null);
+      setNotice(`已载入第 ${detail.sceneNumber} 场，可继续修改或查看制作进度。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '场次载入失败，请稍后重试。');
+    } finally {
+      setIsSceneLoading(false);
+    }
+  }
+
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
     if (saved) {
@@ -89,7 +119,7 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading;
   const latestScene = scenes[0] ?? null;
   const activeSavedScene = useMemo(
     () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
@@ -398,9 +428,9 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className={`hidden sm:inline-flex ${source === 'ai' ? 'border-violet-200 bg-violet-50 text-violet-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
-              <span className={`size-1.5 rounded-full ${source === 'ai' ? 'bg-violet-500' : 'bg-emerald-500'}`} />
-              {source === 'ai' ? 'DeepSeek 智能编译' : '本地规则备用'}
+            <Badge variant="outline" className={`hidden sm:inline-flex ${source === 'ai' ? 'border-violet-200 bg-violet-50 text-violet-700' : source === 'saved' ? 'border-sky-200 bg-sky-50 text-sky-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+              <span className={`size-1.5 rounded-full ${source === 'ai' ? 'bg-violet-500' : source === 'saved' ? 'bg-sky-500' : 'bg-emerald-500'}`} />
+              {source === 'ai' ? 'DeepSeek 智能编译' : source === 'saved' ? '已保存场次' : '本地规则备用'}
             </Badge>
             {previousSceneNumber && <Badge variant="outline" className="hidden border-sky-200 bg-sky-50 text-sky-700 md:inline-flex">继承第 {previousSceneNumber} 场</Badge>}
             <Button variant="outline" onClick={exportResult}>
@@ -704,7 +734,7 @@ export default function Home() {
                         <article key={scene.id} className={`rounded-xl border p-4 ${index === 0 ? 'border-sky-200 bg-sky-50/35' : 'border-border bg-card'}`}>
                           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                             <div className="flex items-center gap-2"><Badge className="bg-sky-700">第 {scene.sceneNumber} 场</Badge><span className="text-sm font-semibold">{scene.title}</span>{index === 0 && <Badge variant="outline">当前继承源</Badge>}</div>
-                            <span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span>
+                            <div className="flex items-center gap-2"><span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span><Button size="sm" variant="outline" onClick={() => void loadSavedScene(scene)} disabled={busy}>{isSceneLoading ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <FileText data-icon="inline-start" />}载入本场</Button></div>
                           </div>
                           <div className="grid gap-2 sm:grid-cols-3">
                             <StateField label="空间 / 时间" value={`${scene.snapshot.spaceState} · ${scene.snapshot.timeState}`} />

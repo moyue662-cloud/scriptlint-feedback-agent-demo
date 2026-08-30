@@ -1,5 +1,5 @@
 import { buildSceneSnapshot, sceneContinuityContext } from '@/lib/scene-state';
-import { getLatestScene, listScenes, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
+import { getLatestScene, getSceneById, listScenes, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import type { StoryboardResult } from '@/lib/storyboard-engine';
 
@@ -10,8 +10,14 @@ async function hashSource(script: string) {
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const sceneId = new URL(request.url).searchParams.get('id')?.trim() ?? '';
+    if (sceneId) {
+      const scene = await getSceneById(sceneId);
+      if (!scene) return Response.json({ error: '找不到要载入的场次。' }, { status: 404 });
+      return Response.json({ scene });
+    }
     const scenes = await listScenes();
     return Response.json({
       scenes,

@@ -46,7 +46,7 @@ export interface AnalysisResult {
   analyzedAt: string;
 }
 
-export type AnalysisSource = 'ai' | 'local';
+export type AnalysisSource = 'ai' | 'local' | 'saved';
 
 const emotionActions: Record<string, string> = {
   生气: '攥紧手中的物品，呼吸变重，直视对方后再开口',

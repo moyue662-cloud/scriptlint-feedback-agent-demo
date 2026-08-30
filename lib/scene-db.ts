@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 
 import { createSceneStatesTableSql } from '@/db/schema';
 import type {
-  DeliveryShotStatus, DeliveryTrackingState, SceneSnapshot, StoredScene,
+  DeliveryShotStatus, DeliveryTrackingState, SceneSnapshot, StoredScene, StoredSceneDetail,
 } from '@/lib/scene-state';
 import type { AnalysisResult } from '@/lib/script-engine';
 import type { StoryboardResult } from '@/lib/storyboard-engine';
@@ -12,6 +12,8 @@ interface SceneRow {
   scene_number: number;
   title: string;
   script: string;
+  analysis_json?: string;
+  storyboard_json?: string;
   snapshot_json: string;
   delivery_tracking_json?: string | null;
   created_at: string;
@@ -69,6 +71,15 @@ function toStoredScene(row: SceneRow): StoredScene {
   };
 }
 
+function toStoredSceneDetail(row: SceneRow): StoredSceneDetail {
+  if (!row.analysis_json || !row.storyboard_json) throw new Error('场次详情数据不完整');
+  return {
+    ...toStoredScene(row),
+    analysis: JSON.parse(row.analysis_json) as AnalysisResult,
+    storyboard: JSON.parse(row.storyboard_json) as StoryboardResult,
+  };
+}
+
 export async function listScenes(limit = 30) {
   await ensureSchema();
   const result = await database().prepare(
@@ -85,6 +96,16 @@ export async function getLatestScene() {
      FROM scene_states ORDER BY scene_number DESC LIMIT 1`,
   ).first<SceneRow>();
   return row ? toStoredScene(row) : null;
+}
+
+export async function getSceneById(id: string) {
+  await ensureSchema();
+  const row = await database().prepare(
+    `SELECT id, scene_number, title, script, analysis_json, storyboard_json,
+       snapshot_json, delivery_tracking_json, created_at
+     FROM scene_states WHERE id = ?`,
+  ).bind(id).first<SceneRow>();
+  return row ? toStoredSceneDetail(row) : null;
 }
 
 export async function saveScene(input: {

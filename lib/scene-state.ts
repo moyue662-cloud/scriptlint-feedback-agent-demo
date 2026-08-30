@@ -35,6 +35,11 @@ export interface StoredScene {
   createdAt: string;
 }
 
+export interface StoredSceneDetail extends StoredScene {
+  analysis: AnalysisResult;
+  storyboard: StoryboardResult;
+}
+
 export function buildSceneSnapshot(analysis: AnalysisResult, storyboard: StoryboardResult): SceneSnapshot {
   const finalShot = storyboard.shots.at(-1);
   const characters = analysis.characters.map((name) => {
