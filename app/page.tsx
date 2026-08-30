@@ -18,7 +18,9 @@ import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
 import type { DeliveryShotStatus, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
-import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
+import {
+  buildFallbackStoryboard, finalizeStoryboard, type ShotState, type StoryboardResult,
+} from '@/lib/storyboard-engine';
 import {
   buildVideoDeliveryPackage, validateVideoDeliveryPackage, videoDeliveryToMarkdown,
   type DeliveryAspectRatio, type VideoDeliveryPackage,
@@ -34,6 +36,18 @@ const sampleScript = `客厅，夜晚。
 林晓不相信父亲的解释，继续追问。父亲沉默。`;
 
 const AI_REQUEST_TIMEOUT_MS = 30000;
+const PIPELINE_LOOP_LIMIT = 3;
+
+type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
+const pipelinePhaseLabels: Record<PipelinePhase, string> = {
+  idle: '未运行', analyzing: '分析剧本', repairing_script: '修复剧本结构',
+  generating_storyboard: '生成分镜', repairing_storyboard: '修复分镜连续性',
+  complete: '已完成', blocked: '等待处理', error: '运行失败',
+};
+const pipelinePhaseProgress: Record<PipelinePhase, number> = {
+  idle: 0, analyzing: 12, repairing_script: 34, generating_storyboard: 58,
+  repairing_storyboard: 78, complete: 100, blocked: 100, error: 100,
+};
 
 const pipeline = [
   { id: '01', label: '剧本理解', icon: FileText },
@@ -61,6 +75,9 @@ export default function Home() {
   const [sceneTitle, setSceneTitle] = useState('');
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
+  const [isPipelineRunning, setIsPipelineRunning] = useState(false);
+  const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>('idle');
+  const [pipelineStep, setPipelineStep] = useState('');
   const [previousSceneNumber, setPreviousSceneNumber] = useState<number | null>(null);
   const [reviewedShotIds, setReviewedShotIds] = useState<string[]>([]);
   const [deliveryAspectRatio, setDeliveryAspectRatio] = useState<DeliveryAspectRatio>('9:16');
@@ -119,7 +136,7 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isPipelineRunning;
   const latestScene = scenes[0] ?? null;
   const activeSavedScene = useMemo(
     () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
@@ -162,6 +179,119 @@ export default function Home() {
     if (!response.ok || !payload.result) throw new Error(payload.error || '智能分析失败');
     setPreviousSceneNumber(payload.meta?.previousSceneNumber ?? null);
     return payload.result;
+  }
+
+  async function runFullPipeline() {
+    if (!script.trim() || busy) return;
+    setIsPipelineRunning(true);
+    setPipelinePhase('analyzing');
+    setPipelineStep('正在读取原始剧本并建立交互节拍');
+    setNotice('');
+    window.localStorage.setItem('scene-flow-script', script);
+    setLoopCount(0);
+    setStoryboardLoopCount(0);
+    setStoryboard(null);
+    setReviewedShotIds([]);
+    setDeliveryShotStatuses({});
+    setDeliveryCopied(false);
+    try {
+      let analysis: AnalysisResult;
+      let analysisSource: AnalysisSource = 'ai';
+      try {
+        analysis = await requestAI({ script, mode: 'analyze' });
+      } catch {
+        analysis = analyzeScript(script);
+        analysisSource = 'local';
+      }
+      setResult(analysis);
+      setSource(analysisSource);
+      let scriptRepairCount = 0;
+      while (analysis.issues.some((issue) => !issue.resolved) && scriptRepairCount < PIPELINE_LOOP_LIMIT) {
+        setPipelinePhase('repairing_script');
+        setPipelineStep(`正在运行剧本修复 Loop ${scriptRepairCount + 1}/${PIPELINE_LOOP_LIMIT}`);
+        try {
+          analysis = await requestAI({
+            script, mode: 'repair', current: analysis, loopCount: scriptRepairCount + 1,
+          });
+          analysisSource = 'ai';
+        } catch {
+          analysis = repairAnalysis(analysis);
+          analysisSource = 'local';
+        }
+        scriptRepairCount += 1;
+        setResult(analysis);
+        setSource(analysisSource);
+        setLoopCount(scriptRepairCount);
+      }
+      if (analysis.issues.some((issue) => !issue.resolved && issue.severity === 'hard')) {
+        setPipelinePhase('blocked');
+        setPipelineStep('剧本仍有硬问题，已停止自动推进');
+        setNotice('全流程已在剧本阶段暂停。请先补充人物或明确交互对象，再重新运行。');
+        return;
+      }
+
+      setPipelinePhase('generating_storyboard');
+      setPipelineStep('正在把交互节拍转换成连续性分镜');
+      let nextStoryboard: StoryboardResult;
+      try {
+        const response = await fetch('/api/storyboard', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ script, analysis }),
+        });
+        const payload = await response.json() as { result?: StoryboardResult; error?: string };
+        if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
+        nextStoryboard = payload.result;
+      } catch {
+        nextStoryboard = finalizeStoryboard(buildFallbackStoryboard(analysis), analysis);
+      }
+      setStoryboard(nextStoryboard);
+      setStoryboardLoopCount(0);
+      setReviewedShotIds([]);
+      setDeliveryShotStatuses({});
+
+      let storyboardRepairCount = 0;
+      while (nextStoryboard.issues.some((issue) => !issue.resolved) && storyboardRepairCount < PIPELINE_LOOP_LIMIT) {
+        setPipelinePhase('repairing_storyboard');
+        setPipelineStep(`正在运行分镜修复 Loop ${storyboardRepairCount + 1}/${PIPELINE_LOOP_LIMIT}`);
+        try {
+          const response = await fetch('/api/storyboard', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              script, analysis, mode: 'repair', current: nextStoryboard,
+              loopCount: storyboardRepairCount + 1,
+            }),
+          });
+          const payload = await response.json() as { result?: StoryboardResult; error?: string };
+          if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
+          nextStoryboard = payload.result;
+        } catch {
+          break;
+        }
+        storyboardRepairCount += 1;
+        setStoryboard(nextStoryboard);
+        setStoryboardLoopCount(storyboardRepairCount);
+      }
+      if (nextStoryboard.issues.some((issue) => !issue.resolved && issue.severity === 'hard')) {
+        setPipelinePhase('blocked');
+        setPipelineStep('分镜仍有硬问题，已停止自动推进');
+        setNotice('全流程已在分镜阶段暂停。请检查连续性报告，修复后再进行人工确认。');
+        return;
+      }
+      const remainingStoryboardIssues = nextStoryboard.issues.filter((issue) => !issue.resolved).length;
+      setPipelinePhase('complete');
+      setPipelineStep('剧本、交互节拍、分镜和连续性检查已完成');
+      setNotice(remainingStoryboardIssues > 0
+        ? `全流程完成，但仍有 ${remainingStoryboardIssues} 项软性分镜提示，请人工复核。`
+        : '全流程完成，请进入分镜页逐镜确认后保存场次状态。');
+    } catch (error) {
+      setPipelinePhase('error');
+      setPipelineStep('自动流程异常中止');
+      setNotice(error instanceof Error ? error.message : '全流程运行失败，请稍后重试。');
+    } finally {
+      setIsPipelineRunning(false);
+    }
   }
 
   async function runAnalysis() {
@@ -483,11 +613,24 @@ export default function Home() {
                   <button className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" onClick={() => setScript(sampleScript)}>
                     恢复示例剧本
                   </button>
-                  <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || busy} className="px-4">
-                    {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
-                    {isRunning ? '智能编译中…' : 'AI 编译这场戏'}
-                  </Button>
+                  <div className="flex flex-wrap gap-2">
+                    <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || busy} className="px-4">
+                      {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
+                      {isRunning ? '智能编译中…' : 'AI 编译这场戏'}
+                    </Button>
+                    <Button size="lg" variant="outline" onClick={runFullPipeline} disabled={!script.trim() || busy} className="px-4">
+                      {isPipelineRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Sparkles data-icon="inline-start" />}
+                      {isPipelineRunning ? '全流程运行中…' : '运行全流程'}
+                    </Button>
+                  </div>
                 </div>
+                {pipelinePhase !== 'idle' && (
+                  <div className={`mt-3 rounded-lg border px-3 py-2.5 text-xs leading-5 ${pipelinePhase === 'complete' ? 'border-emerald-200 bg-emerald-50 text-emerald-900' : pipelinePhase === 'blocked' || pipelinePhase === 'error' ? 'border-amber-200 bg-amber-50 text-amber-900' : 'border-sky-200 bg-sky-50 text-sky-900'}`}>
+                    <div className="flex flex-wrap items-center justify-between gap-2"><span className="font-semibold">全流程 · {pipelinePhaseLabels[pipelinePhase]}</span><span className="tabular-nums">{pipelinePhaseProgress[pipelinePhase]}%</span></div>
+                    <p className="mt-1 text-[11px] opacity-85">{pipelineStep}</p>
+                    <Progress value={pipelinePhaseProgress[pipelinePhase]} className="mt-2 h-1.5 [&_[data-slot=progress-indicator]]:bg-sky-600" />
+                  </div>
+                )}
               </CardContent>
             </Card>
 
