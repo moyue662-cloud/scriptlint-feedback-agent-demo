@@ -19,7 +19,10 @@ import {
 } from '@/lib/script-engine';
 import type { StoredScene } from '@/lib/scene-state';
 import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
-import { buildVideoDeliveryPackage, videoDeliveryToMarkdown, type DeliveryAspectRatio, type VideoDeliveryPackage } from '@/lib/video-delivery';
+import {
+  buildVideoDeliveryPackage, validateVideoDeliveryPackage, videoDeliveryToMarkdown,
+  type DeliveryAspectRatio, type VideoDeliveryPackage,
+} from '@/lib/video-delivery';
 
 const sampleScript = `客厅，夜晚。
 林晓发现桌上父亲的辞职通知书，很生气地质问父亲：“你什么时候辞职的？”
@@ -92,8 +95,10 @@ export default function Home() {
         aspectRatio: deliveryAspectRatio,
         resolution: deliveryAspectRatio === '9:16' ? '1080×1920' : '1920×1080',
         style: '写实短剧，电影级自然光，表演克制，台词清晰',
-      })
+    })
     : null, [storyboard, deliveryAspectRatio]);
+  const deliveryValidation = useMemo(() => deliveryPackage ? validateVideoDeliveryPackage(deliveryPackage) : null, [deliveryPackage]);
+  const canDeliver = allShotsReviewed && deliveryValidation?.valid === true;
 
   async function requestAI(body: Record<string, unknown>) {
     const response = await fetch('/api/analyze', {
@@ -261,6 +266,7 @@ export default function Home() {
       sourceScript: script, analysis: result, storyboard, sceneHistory: scenes,
       humanReview: { approved: allShotsReviewed, reviewedShotIds, reviewedAt: allShotsReviewed ? new Date().toISOString() : null },
       videoDeliveryPackage: deliveryPackage,
+      videoDeliveryValidation: deliveryValidation,
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -297,14 +303,14 @@ export default function Home() {
   }
 
   async function copyDeliveryPackage() {
-    if (!deliveryPackage || !allShotsReviewed) return;
+    if (!deliveryPackage || !canDeliver) return;
     await navigator.clipboard.writeText(videoDeliveryToMarkdown(deliveryPackage));
     setDeliveryCopied(true);
     window.setTimeout(() => setDeliveryCopied(false), 1600);
   }
 
   function downloadDeliveryPackage() {
-    if (!deliveryPackage || !allShotsReviewed) return;
+    if (!deliveryPackage || !canDeliver) return;
     const blob = new Blob([JSON.stringify(deliveryPackage, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -681,9 +687,20 @@ export default function Home() {
                       <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
                         <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
                           <div><p className="text-sm font-semibold text-emerald-950">视频生成交付包已就绪</p><p className="mt-1 text-xs leading-5 text-emerald-800">可复制Markdown交给视频工具，或下载JSON作为逐镜输入。</p></div>
-                          <div className="flex flex-wrap gap-2"><Button onClick={copyDeliveryPackage}>{deliveryCopied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{deliveryCopied ? '已复制' : '复制交付包'}</Button><Button variant="outline" onClick={downloadDeliveryPackage}><Download data-icon="inline-start" />下载JSON</Button></div>
+                          <div className="flex flex-wrap gap-2"><Button onClick={copyDeliveryPackage} disabled={!canDeliver}>{deliveryCopied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{deliveryCopied ? '已复制' : '复制交付包'}</Button><Button variant="outline" onClick={downloadDeliveryPackage} disabled={!canDeliver}><Download data-icon="inline-start" />下载JSON</Button></div>
                         </div>
                       </div>
+                      {deliveryValidation?.valid ? (
+                        <div className="mb-4 flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4 text-xs leading-5 text-emerald-900">
+                          <Check className="mt-0.5 size-4 shrink-0 text-emerald-700" />
+                          <div><p className="font-semibold">交付前校验通过 · video-delivery/v1</p><p className="mt-1">镜头顺序、时长、Prompt、台词和连续性锁定字段完整，可交给视频生成工具。</p></div>
+                        </div>
+                      ) : (
+                        <div className="mb-4 rounded-xl border border-red-200 bg-red-50/70 p-4 text-xs leading-5 text-red-900">
+                          <p className="font-semibold">交付前校验未通过</p>
+                          <div className="mt-1 space-y-1">{deliveryValidation?.issues.slice(0, 5).map((issue) => <p key={`${issue.code}-${issue.shotId ?? 'global'}`}>· {issue.shotId ? `${issue.shotId}：` : ''}{issue.message}</p>)}</div>
+                        </div>
+                      )}
                       <div className="mb-4 rounded-xl border border-border bg-card p-4">
                         <p className="mb-2 text-sm font-semibold">交付参数</p>
                         <div className="flex flex-wrap gap-2">
