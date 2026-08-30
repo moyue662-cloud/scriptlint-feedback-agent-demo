@@ -90,6 +90,7 @@ export default function Home() {
   const [selectedEpisode, setSelectedEpisode] = useState<number | 'all'>('all');
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
+  const [isSceneReordering, setIsSceneReordering] = useState(false);
   const [project, setProject] = useState<SceneProject | null>(null);
   const [projectName, setProjectName] = useState('');
   const [isProjectSaving, setIsProjectSaving] = useState(false);
@@ -191,13 +192,17 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isPipelineRunning || isProjectSaving;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isPipelineRunning || isProjectSaving;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
     const totalShots = ordered.reduce((total, scene) => total + scene.summary.shotCount, 0);
     const totalDurationSec = ordered.reduce((total, scene) => total + scene.summary.durationSec, 0);
     const acceptedShots = ordered.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0);
+    const statusCounts = ordered.reduce<Record<SceneProductionStatus, number>>((counts, scene) => {
+      counts[scene.summary.status] += 1;
+      return counts;
+    }, { ready: 0, 'needs-review': 0, 'in-production': 0, completed: 0 });
     const episodes = Array.from(new Set(ordered.map((scene) => scene.episodeNumber))).map((episodeNumber) => ({
       episodeNumber,
       scenes: ordered.filter((scene) => scene.episodeNumber === episodeNumber),
@@ -209,6 +214,7 @@ export default function Home() {
       totalDurationSec,
       acceptedShots,
       productionProgress: totalShots > 0 ? Math.round((acceptedShots / totalShots) * 100) : 0,
+      statusCounts,
     };
   }, [scenes]);
   const visibleTimeline = useMemo(() => {
@@ -542,13 +548,14 @@ export default function Home() {
     setDeliveryShotStatuses({});
     setSceneTitle('');
     setEpisodeNumber(latestScene?.episodeNumber ?? 1);
-    setPreviousSceneNumber(latestScene?.sceneNumber ?? null);
+    setPreviousSceneNumber(latestScene?.sceneOrder ?? null);
     setNotice(latestScene ? `已载入第 ${latestScene.episodeNumber} 集第 ${latestScene.sceneOrder} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
     window.localStorage.setItem('scene-flow-script', '');
   }
 
   async function moveScene(sceneId: string, direction: 'move-up' | 'move-down') {
     if (busy) return;
+    setIsSceneReordering(true);
     try {
       const response = await fetch('/api/scenes', {
         method: 'PATCH',
@@ -565,6 +572,8 @@ export default function Home() {
       }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '场次顺序调整失败，请稍后重试。');
+    } finally {
+      setIsSceneReordering(false);
     }
   }
 
@@ -604,9 +613,7 @@ export default function Home() {
       });
       const payload = await response.json() as { tracking?: StoredScene['deliveryTracking']; error?: string };
       if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
-      setScenes((current) => current.map((scene) => scene.id === sceneId
-        ? { ...scene, deliveryTracking: payload.tracking! }
-        : scene));
+      await loadScenes();
       setNotice('制作进度已保存，刷新页面后仍可继续。');
     }).catch((error) => {
       setNotice(error instanceof Error ? error.message : '制作进度保存失败，请稍后重试。');
@@ -996,6 +1003,27 @@ export default function Home() {
                     {storyboard && !allShotsReviewed && <p className="mt-3 text-xs text-violet-800">请先完成全部镜头的人工确认，再把本场写入状态库。</p>}
                     {storyboard && allShotsReviewed && !canSaveScene && <p className="mt-3 text-xs text-amber-800">请先解决剧本或分镜中的硬性问题，再把本场写入状态库。</p>}
                   </div>
+
+                  {scenes.length > 0 && (
+                    <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
+                      <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-950">整部短剧制作总览</p>
+                          <p className="mt-1 text-xs leading-5 text-slate-700">这里汇总全部集数；下方时间线可再按集数筛选。</p>
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 text-center text-[11px] text-slate-700">
+                          <div className="rounded-lg bg-white px-2.5 py-2"><p className="text-lg font-semibold tabular-nums text-slate-950">{sceneTimeline.scenes.length}</p><p>场次</p></div>
+                          <div className="rounded-lg bg-white px-2.5 py-2"><p className="text-lg font-semibold tabular-nums text-slate-950">{sceneTimeline.totalShots}</p><p>镜头</p></div>
+                          <div className="rounded-lg bg-white px-2.5 py-2"><p className="text-lg font-semibold tabular-nums text-slate-950">{sceneTimeline.totalDurationSec}秒</p><p>时长</p></div>
+                          <div className="rounded-lg bg-white px-2.5 py-2"><p className="text-lg font-semibold tabular-nums text-slate-950">{sceneTimeline.productionProgress}%</p><p>完成度</p></div>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex items-center gap-3"><Progress value={sceneTimeline.productionProgress} className="h-2 flex-1 bg-slate-200" /><span className="min-w-12 text-right text-xs font-semibold tabular-nums text-slate-800">{sceneTimeline.productionProgress}%</span></div>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {(Object.keys(sceneStatusLabels) as SceneProductionStatus[]).map((status) => <Badge key={status} variant="outline" className={sceneStatusClasses[status]}>{sceneStatusLabels[status]} {sceneTimeline.statusCounts[status]}</Badge>)}
+                      </div>
+                    </div>
+                  )}
 
                   {scenes.length > 0 && (
                     <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">

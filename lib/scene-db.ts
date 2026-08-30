@@ -42,7 +42,6 @@ async function ensureSchema() {
     const db = database();
     await db.prepare(createProjectsTableSql).run();
     await db.prepare(createSceneStatesTableSql).run();
-    await db.prepare(createSceneOrderIndexSql).run();
     const columns = await db.prepare('PRAGMA table_info(scene_states)').all<{ name: string }>();
     if (!columns.results.some((column) => column.name === 'delivery_tracking_json')) {
       try {
@@ -75,6 +74,7 @@ async function ensureSchema() {
       }
       await db.prepare('UPDATE scene_states SET scene_order = scene_number WHERE scene_order = 0').run();
     }
+    await db.prepare(createSceneOrderIndexSql).run();
     await db.prepare(
       'INSERT OR IGNORE INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)',
     ).bind(DEFAULT_PROJECT_ID, '未命名短剧项目', new Date().toISOString(), new Date().toISOString()).run();
