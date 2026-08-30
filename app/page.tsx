@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, Check, ChevronRight, Clipboard, Download,
   Camera, Clock, Database, FileText, Film, GitBranch, Loader2, Play,
-  RefreshCcw, Save, ScanSearch, Sparkles, Users,
+  PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -19,6 +19,7 @@ import {
 } from '@/lib/script-engine';
 import type { StoredScene } from '@/lib/scene-state';
 import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
+import { buildVideoDeliveryPackage, videoDeliveryToMarkdown, type DeliveryAspectRatio, type VideoDeliveryPackage } from '@/lib/video-delivery';
 
 const sampleScript = `客厅，夜晚。
 林晓发现桌上父亲的辞职通知书，很生气地质问父亲：“你什么时候辞职的？”
@@ -52,6 +53,8 @@ export default function Home() {
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [previousSceneNumber, setPreviousSceneNumber] = useState<number | null>(null);
   const [reviewedShotIds, setReviewedShotIds] = useState<string[]>([]);
+  const [deliveryAspectRatio, setDeliveryAspectRatio] = useState<DeliveryAspectRatio>('9:16');
+  const [deliveryCopied, setDeliveryCopied] = useState(false);
 
   async function loadScenes() {
     try {
@@ -82,6 +85,13 @@ export default function Home() {
   const reviewedShotCount = storyboard?.shots.filter((shot) => reviewedShotSet.has(shot.id)).length ?? 0;
   const allShotsReviewed = Boolean(storyboard?.shots.length) && reviewedShotCount === storyboard?.shots.length;
   const canSaveScene = Boolean(storyboard) && allShotsReviewed && hardIssues.length === 0 && !hasHardStoryboardIssues;
+  const deliveryPackage = useMemo<VideoDeliveryPackage | null>(() => storyboard
+    ? buildVideoDeliveryPackage(storyboard, {
+        aspectRatio: deliveryAspectRatio,
+        resolution: deliveryAspectRatio === '9:16' ? '1080×1920' : '1920×1080',
+        style: '写实短剧，电影级自然光，表演克制，台词清晰',
+      })
+    : null, [storyboard, deliveryAspectRatio]);
 
   async function requestAI(body: Record<string, unknown>) {
     const response = await fetch('/api/analyze', {
@@ -111,6 +121,7 @@ export default function Home() {
       setStoryboard(null);
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
+      setDeliveryCopied(false);
     } catch (error) {
       setResult(analyzeScript(script));
       setSource('local');
@@ -118,6 +129,7 @@ export default function Home() {
       setStoryboard(null);
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
+      setDeliveryCopied(false);
       setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}，已切换到本地规则结果。`);
     } finally {
       setIsRunning(false);
@@ -138,6 +150,7 @@ export default function Home() {
       setStoryboard(null);
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
+      setDeliveryCopied(false);
     } catch (error) {
       setResult((current) => repairAnalysis(current));
       setSource('local');
@@ -145,6 +158,7 @@ export default function Home() {
       setStoryboard(null);
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
+      setDeliveryCopied(false);
       setNotice(`${error instanceof Error ? error.message : '智能修复暂时不可用'}，本轮已由本地规则完成。`);
     } finally {
       setIsRunning(false);
@@ -166,6 +180,7 @@ export default function Home() {
       setStoryboard(payload.result);
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
+      setDeliveryCopied(false);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '分镜生成暂时不可用，请稍后重试。');
     } finally {
@@ -191,6 +206,7 @@ export default function Home() {
       setStoryboard(payload.result);
       setStoryboardLoopCount((current) => current + 1);
       setReviewedShotIds([]);
+      setDeliveryCopied(false);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '分镜修复暂时不可用，请稍后重试。');
     } finally {
@@ -230,6 +246,7 @@ export default function Home() {
     setStoryboard(null);
     setStoryboardLoopCount(0);
     setReviewedShotIds([]);
+    setDeliveryCopied(false);
     setSceneTitle('');
     setPreviousSceneNumber(latestScene?.sceneNumber ?? null);
     setNotice(latestScene ? `已载入第 ${latestScene.sceneNumber} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
@@ -240,6 +257,7 @@ export default function Home() {
     const payload = {
       sourceScript: script, analysis: result, storyboard, sceneHistory: scenes,
       humanReview: { approved: allShotsReviewed, reviewedShotIds, reviewedAt: allShotsReviewed ? new Date().toISOString() : null },
+      videoDeliveryPackage: deliveryPackage,
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -273,6 +291,24 @@ export default function Home() {
   function approveAllShots() {
     if (!storyboard) return;
     setReviewedShotIds(storyboard.shots.map((shot) => shot.id));
+  }
+
+  async function copyDeliveryPackage() {
+    if (!deliveryPackage || !allShotsReviewed) return;
+    await navigator.clipboard.writeText(videoDeliveryToMarkdown(deliveryPackage));
+    setDeliveryCopied(true);
+    window.setTimeout(() => setDeliveryCopied(false), 1600);
+  }
+
+  function downloadDeliveryPackage() {
+    if (!deliveryPackage || !allShotsReviewed) return;
+    const blob = new Blob([JSON.stringify(deliveryPackage, null, 2)], { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = '视频生成交付包.json';
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   return (
@@ -393,6 +429,7 @@ export default function Home() {
                     <TabsTrigger value="prompt">执行Prompt</TabsTrigger>
                     <TabsTrigger value="storyboard">分镜 {storyboard ? storyboard.shots.length : ''}</TabsTrigger>
                     <TabsTrigger value="states">状态库 {scenes.length || ''}</TabsTrigger>
+                    <TabsTrigger value="delivery">交付包</TabsTrigger>
                   </TabsList>
                 </div>
               </CardHeader>
@@ -617,12 +654,52 @@ export default function Home() {
                   )}
                 </CardContent>
               </TabsContent>
+
+              <TabsContent value="delivery" className="m-0">
+                <CardContent className="py-4">
+                  {!storyboard ? (
+                    <div className="grid min-h-[430px] place-items-center rounded-xl border border-dashed border-border bg-muted/25 p-8 text-center">
+                      <div className="max-w-md">
+                        <span className="mx-auto mb-4 grid size-12 place-items-center rounded-2xl bg-primary/10 text-primary"><PackageCheck className="size-5" /></span>
+                        <h3 className="font-semibold">生成分镜后创建视频交付包</h3>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">交付包会按镜头顺序整理Prompt、时长、台词和连续性锁定条件。</p>
+                      </div>
+                    </div>
+                  ) : !allShotsReviewed ? (
+                    <div className="grid min-h-[430px] place-items-center rounded-xl border border-violet-200 bg-violet-50/50 p-8 text-center">
+                      <div className="max-w-md">
+                        <span className="mx-auto mb-4 grid size-12 place-items-center rounded-2xl bg-violet-100 text-violet-700"><PackageCheck className="size-5" /></span>
+                        <h3 className="font-semibold">请先完成人工审阅</h3>
+                        <p className="mt-2 text-sm leading-6 text-violet-800">当前已确认 {reviewedShotCount}/{storyboard.shots.length} 个镜头。全部确认后，系统才会开放视频交付包。</p>
+                      </div>
+                    </div>
+                  ) : deliveryPackage ? (
+                    <div>
+                      <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50/60 p-4">
+                        <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
+                          <div><p className="text-sm font-semibold text-emerald-950">视频生成交付包已就绪</p><p className="mt-1 text-xs leading-5 text-emerald-800">可复制Markdown交给视频工具，或下载JSON作为逐镜输入。</p></div>
+                          <div className="flex flex-wrap gap-2"><Button onClick={copyDeliveryPackage}>{deliveryCopied ? <Check data-icon="inline-start" /> : <Clipboard data-icon="inline-start" />}{deliveryCopied ? '已复制' : '复制交付包'}</Button><Button variant="outline" onClick={downloadDeliveryPackage}><Download data-icon="inline-start" />下载JSON</Button></div>
+                        </div>
+                      </div>
+                      <div className="mb-4 rounded-xl border border-border bg-card p-4">
+                        <p className="mb-2 text-sm font-semibold">交付参数</p>
+                        <div className="flex flex-wrap gap-2">
+                          {(['9:16', '16:9'] as DeliveryAspectRatio[]).map((ratio) => <Button key={ratio} size="sm" variant={deliveryAspectRatio === ratio ? 'default' : 'outline'} onClick={() => setDeliveryAspectRatio(ratio)}>{ratio} {ratio === '9:16' ? '竖屏短剧' : '横屏短剧'}</Button>)}
+                          <Badge variant="secondary">{deliveryAspectRatio === '9:16' ? '1080×1920' : '1920×1080'}</Badge>
+                          <Badge variant="secondary">写实短剧 · 自然光 · 台词清晰</Badge>
+                        </div>
+                      </div>
+                      <pre className="max-h-[650px] overflow-auto whitespace-pre-wrap rounded-xl bg-[#201d1a] p-5 font-mono text-xs leading-6 text-[#f7f0e5]">{videoDeliveryToMarkdown(deliveryPackage)}</pre>
+                    </div>
+                  ) : null}
+                </CardContent>
+              </TabsContent>
             </Tabs>
           </Card>
         </section>
 
         <footer className="mt-6 flex flex-col justify-between gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row">
-          <span>交互分析、分镜修复与跨场景状态继承已串联。</span>
+          <span>交互分析、分镜修复、人工确认与视频交付已串联。</span>
           <span className="flex items-center gap-1.5"><Sparkles className="size-3.5" />DeepSeek · 状态锁定 · 连续性规则</span>
         </footer>
       </div>
