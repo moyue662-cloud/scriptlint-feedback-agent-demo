@@ -6,6 +6,7 @@ export const runtime = 'edge';
 
 const MODEL = 'deepseek-v4-pro';
 const API_URL = 'https://api.deepseek.com/responses';
+const MODEL_TIMEOUT_MS = 26000;
 const issueTypes = [
   'missing_character', 'abstract_emotion', 'missing_response', 'weak_action',
   'knowledge_risk', 'emotion_jump', 'continuity', 'dialogue_logic',
@@ -155,28 +156,35 @@ export async function POST(request: Request) {
       ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}${continuityContext}`
       : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。${continuityContext}\n\n当前场原始剧本：\n${script}`;
 
-    const modelResponse = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        instructions,
-        input,
-        reasoning: { effort: 'low' },
-        text: {
-          format: {
-            type: 'json_schema',
-            name: 'short_drama_interaction_analysis',
-            schema: analysisSchema,
-          },
+    let modelResponse: Response;
+    try {
+      modelResponse = await fetch(API_URL, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
         },
-        max_output_tokens: 10000,
-        store: false,
-      }),
-    });
+        body: JSON.stringify({
+          model: MODEL,
+          instructions,
+          input,
+          reasoning: { effort: 'low' },
+          text: {
+            format: {
+              type: 'json_schema',
+              name: 'short_drama_interaction_analysis',
+              schema: analysisSchema,
+            },
+          },
+          max_output_tokens: 10000,
+          store: false,
+        }),
+        signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+      });
+    } catch (error) {
+      console.warn('DeepSeek analysis unavailable', error instanceof Error ? error.message : 'unknown error');
+      return Response.json({ error: '智能分析响应超时或暂时不可用，请稍后再试。' }, { status: 504 });
+    }
 
     const payload = await modelResponse.json() as Record<string, unknown>;
     if (!modelResponse.ok) {

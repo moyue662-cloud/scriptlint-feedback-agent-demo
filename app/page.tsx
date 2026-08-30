@@ -26,6 +26,8 @@ const sampleScript = `客厅，夜晚。
 父亲很尴尬，试图隐瞒：“这不重要。”
 林晓不相信父亲的解释，继续追问。父亲沉默。`;
 
+const AI_REQUEST_TIMEOUT_MS = 30000;
+
 const pipeline = [
   { id: '01', label: '剧本理解', icon: FileText },
   { id: '02', label: '交互节拍', icon: GitBranch },
@@ -98,6 +100,7 @@ export default function Home() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
     });
     const payload = await response.json() as {
       result?: AnalysisResult;
