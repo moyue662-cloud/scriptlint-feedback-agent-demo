@@ -1,4 +1,4 @@
-import { buildSceneSnapshot, sceneContinuityContext } from '@/lib/scene-state';
+import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '@/lib/scene-state';
 import { getLatestScene, getSceneById, listScenes, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import type { StoryboardResult } from '@/lib/storyboard-engine';
@@ -18,7 +18,8 @@ export async function GET(request: Request) {
       if (!scene) return Response.json({ error: '找不到要载入的场次。' }, { status: 404 });
       return Response.json({ scene });
     }
-    const scenes = await listScenes();
+    const projectId = new URL(request.url).searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
+    const scenes = await listScenes(projectId);
     return Response.json({
       scenes,
       continuityContext: scenes[0] ? sceneContinuityContext(scenes[0]) : null,
@@ -33,6 +34,7 @@ export async function POST(request: Request) {
   try {
     const body = await request.json() as {
       title?: string;
+      projectId?: string;
       script?: string;
       analysis?: AnalysisResult;
       storyboard?: StoryboardResult;
@@ -43,8 +45,10 @@ export async function POST(request: Request) {
       return Response.json({ error: '请先完成本场剧本分析和分镜，再保存场次状态。' }, { status: 400 });
     }
     const snapshot = buildSceneSnapshot(body.analysis, body.storyboard);
+    const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;
     const saved = await saveScene({
       title: body.title?.trim().slice(0, 80) || '未命名场次',
+      projectId,
       sourceHash: await hashSource(script),
       script,
       analysis: body.analysis,
@@ -52,7 +56,7 @@ export async function POST(request: Request) {
       deliveryTracking: body.deliveryTracking,
       snapshot,
     });
-    const latest = await getLatestScene();
+    const latest = await getLatestScene(projectId);
     return Response.json({ saved, latest, continuityContext: latest ? sceneContinuityContext(latest) : null });
   } catch (error) {
     console.error('Scene state save failed', error instanceof Error ? error.message : 'unknown error');

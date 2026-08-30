@@ -17,7 +17,8 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
-import type { DeliveryShotStatus, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
+import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
+import type { DeliveryShotStatus, SceneProject, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import {
   buildFallbackStoryboard, finalizeStoryboard, type ShotState, type StoryboardResult,
 } from '@/lib/storyboard-engine';
@@ -75,6 +76,9 @@ export default function Home() {
   const [sceneTitle, setSceneTitle] = useState('');
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
+  const [project, setProject] = useState<SceneProject | null>(null);
+  const [projectName, setProjectName] = useState('');
+  const [isProjectSaving, setIsProjectSaving] = useState(false);
   const [isPipelineRunning, setIsPipelineRunning] = useState(false);
   const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>('idle');
   const [pipelineStep, setPipelineStep] = useState('');
@@ -92,6 +96,19 @@ export default function Home() {
       if (response.ok && payload.scenes) setScenes(payload.scenes);
     } catch {
       // The current-scene workflow remains usable if persistent history is temporarily unavailable.
+    }
+  }
+
+  async function loadProject() {
+    try {
+      const response = await fetch('/api/project');
+      const payload = await response.json() as { project?: SceneProject };
+      if (response.ok && payload.project) {
+        setProject(payload.project);
+        setProjectName(payload.project.name);
+      }
+    } catch {
+      // Project metadata is non-blocking; the scene workflow remains usable if it is unavailable.
     }
   }
 
@@ -124,6 +141,28 @@ export default function Home() {
     }
   }
 
+  async function saveProjectName() {
+    if (!projectName.trim() || isProjectSaving || busy) return;
+    setIsProjectSaving(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/project', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: projectName }),
+      });
+      const payload = await response.json() as { project?: SceneProject; error?: string };
+      if (!response.ok || !payload.project) throw new Error(payload.error || '项目资料保存失败');
+      setProject(payload.project);
+      setProjectName(payload.project.name);
+      setNotice('项目名称已保存。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '项目资料保存失败，请稍后重试。');
+    } finally {
+      setIsProjectSaving(false);
+    }
+  }
+
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
     if (saved) {
@@ -131,12 +170,13 @@ export default function Home() {
       setResult(analyzeScript(saved));
     }
     void loadScenes();
+    void loadProject();
   }, []);
 
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isPipelineRunning;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isPipelineRunning || isProjectSaving;
   const latestScene = scenes[0] ?? null;
   const activeSavedScene = useMemo(
     () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
@@ -414,6 +454,7 @@ export default function Home() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          projectId: project?.id || DEFAULT_PROJECT_ID,
           title: sceneTitle, script, analysis: result, storyboard,
           deliveryTracking: { statuses: deliveryShotStatuses },
         }),
@@ -843,6 +884,17 @@ export default function Home() {
 
               <TabsContent value="states" className="m-0">
                 <CardContent className="py-4">
+                  <div className="mb-4 rounded-xl border border-border bg-card p-4">
+                    <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold">项目资料</p>
+                        <p className="mt-1 text-xs text-muted-foreground">项目内场次会按顺序保存，状态继承只在当前项目中生效。</p>
+                        <Input aria-label="项目名称" value={projectName} onChange={(event) => setProjectName(event.target.value)} className="mt-3 max-w-md" placeholder="例如：林晓与父亲" disabled={busy} />
+                      </div>
+                      <Button variant="outline" onClick={saveProjectName} disabled={!projectName.trim() || busy}>{isProjectSaving ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}{isProjectSaving ? '保存中…' : '保存项目名'}</Button>
+                    </div>
+                    {project && <p className="mt-2 text-[11px] text-muted-foreground">当前项目：{project.name} · 已保存 {scenes.length} 场</p>}
+                  </div>
                   <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50/60 p-4">
                     <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
                       <div className="min-w-0 flex-1">

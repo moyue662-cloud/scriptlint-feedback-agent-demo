@@ -25,8 +25,18 @@ export interface DeliveryTrackingState {
   updatedAt: string | null;
 }
 
+export const DEFAULT_PROJECT_ID = 'default';
+
+export interface SceneProject {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface StoredScene {
   id: string;
+  projectId: string;
   sceneNumber: number;
   title: string;
   script: string;
