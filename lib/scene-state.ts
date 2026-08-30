@@ -18,12 +18,20 @@ export interface SceneSnapshot {
   timeState: string;
 }
 
+export type DeliveryShotStatus = 'pending' | 'submitted' | 'accepted';
+
+export interface DeliveryTrackingState {
+  statuses: Record<string, DeliveryShotStatus>;
+  updatedAt: string | null;
+}
+
 export interface StoredScene {
   id: string;
   sceneNumber: number;
   title: string;
   script: string;
   snapshot: SceneSnapshot;
+  deliveryTracking: DeliveryTrackingState;
   createdAt: string;
 }
 

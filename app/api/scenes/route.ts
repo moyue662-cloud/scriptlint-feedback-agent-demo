@@ -1,5 +1,5 @@
 import { buildSceneSnapshot, sceneContinuityContext } from '@/lib/scene-state';
-import { getLatestScene, listScenes, saveScene } from '@/lib/scene-db';
+import { getLatestScene, listScenes, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import type { StoryboardResult } from '@/lib/storyboard-engine';
 
@@ -30,6 +30,7 @@ export async function POST(request: Request) {
       script?: string;
       analysis?: AnalysisResult;
       storyboard?: StoryboardResult;
+      deliveryTracking?: unknown;
     };
     const script = body.script?.trim() ?? '';
     if (!script || !body.analysis?.beats?.length || !body.storyboard?.shots?.length) {
@@ -42,6 +43,7 @@ export async function POST(request: Request) {
       script,
       analysis: body.analysis,
       storyboard: body.storyboard,
+      deliveryTracking: body.deliveryTracking,
       snapshot,
     });
     const latest = await getLatestScene();
@@ -49,5 +51,21 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error('Scene state save failed', error instanceof Error ? error.message : 'unknown error');
     return Response.json({ error: '场次状态保存失败，请稍后重试。' }, { status: 500 });
+  }
+}
+
+export async function PATCH(request: Request) {
+  try {
+    const body = await request.json() as { sceneId?: string; deliveryTracking?: unknown };
+    const sceneId = body.sceneId?.trim() ?? '';
+    if (!sceneId || body.deliveryTracking === undefined) {
+      return Response.json({ error: '缺少场次或制作进度信息。' }, { status: 400 });
+    }
+    const tracking = await updateSceneDeliveryTracking({ sceneId, tracking: body.deliveryTracking });
+    if (!tracking) return Response.json({ error: '找不到要更新的场次。' }, { status: 404 });
+    return Response.json({ tracking });
+  } catch (error) {
+    console.error('Delivery tracking update failed', error instanceof Error ? error.message : 'unknown error');
+    return Response.json({ error: '制作进度保存失败，请稍后重试。' }, { status: 500 });
   }
 }

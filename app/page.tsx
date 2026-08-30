@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, Check, ChevronRight, Clipboard, Download,
   Camera, Clock, Database, FileText, Film, GitBranch, Loader2, Play,
@@ -17,14 +17,13 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
-import type { StoredScene } from '@/lib/scene-state';
+import type { DeliveryShotStatus, StoredScene } from '@/lib/scene-state';
 import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
 import {
   buildVideoDeliveryPackage, validateVideoDeliveryPackage, videoDeliveryToMarkdown,
   type DeliveryAspectRatio, type VideoDeliveryPackage,
 } from '@/lib/video-delivery';
 
-type DeliveryShotStatus = 'pending' | 'submitted' | 'accepted';
 const deliveryStatusLabels: Record<DeliveryShotStatus, string> = {
   pending: '待提交', submitted: '已提交', accepted: '已验收',
 };
@@ -66,6 +65,7 @@ export default function Home() {
   const [deliveryAspectRatio, setDeliveryAspectRatio] = useState<DeliveryAspectRatio>('9:16');
   const [deliveryCopied, setDeliveryCopied] = useState(false);
   const [deliveryShotStatuses, setDeliveryShotStatuses] = useState<Record<string, DeliveryShotStatus>>({});
+  const deliverySaveQueue = useRef<Promise<void>>(Promise.resolve());
 
   async function loadScenes() {
     try {
@@ -91,6 +91,10 @@ export default function Home() {
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
   const busy = isRunning || isStoryboardRunning || isSceneSaving;
   const latestScene = scenes[0] ?? null;
+  const activeSavedScene = useMemo(
+    () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
+    [scenes, script],
+  );
   const hasHardStoryboardIssues = activeContinuityIssues.some((issue) => issue.severity === 'hard');
   const reviewedShotSet = useMemo(() => new Set(reviewedShotIds), [reviewedShotIds]);
   const reviewedShotCount = storyboard?.shots.filter((shot) => reviewedShotSet.has(shot.id)).length ?? 0;
@@ -203,6 +207,7 @@ export default function Home() {
       const payload = await response.json() as { result?: StoryboardResult; error?: string };
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
       setStoryboard(payload.result);
+      setDeliveryShotStatuses(activeSavedScene ? getPersistedDeliveryStatuses(payload.result) : {});
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
       setDeliveryCopied(false);
@@ -229,6 +234,7 @@ export default function Home() {
       const payload = await response.json() as { result?: StoryboardResult; error?: string };
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
       setStoryboard(payload.result);
+      setDeliveryShotStatuses({});
       setStoryboardLoopCount((current) => current + 1);
       setReviewedShotIds([]);
       setDeliveryCopied(false);
@@ -247,7 +253,10 @@ export default function Home() {
       const response = await fetch('/api/scenes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: sceneTitle, script, analysis: result, storyboard }),
+        body: JSON.stringify({
+          title: sceneTitle, script, analysis: result, storyboard,
+          deliveryTracking: { statuses: deliveryShotStatuses },
+        }),
       });
       const payload = await response.json() as {
         saved?: { sceneNumber: number; updated: boolean };
@@ -279,6 +288,15 @@ export default function Home() {
     window.localStorage.setItem('scene-flow-script', '');
   }
 
+  function getPersistedDeliveryStatuses(nextStoryboard: StoryboardResult) {
+    if (!activeSavedScene) return {};
+    const validShotIds = new Set(nextStoryboard.shots.map((shot) => shot.id));
+    return Object.fromEntries(
+      Object.entries(activeSavedScene.deliveryTracking.statuses)
+        .filter(([shotId]) => validShotIds.has(shotId)),
+    ) as Record<string, DeliveryShotStatus>;
+  }
+
   function exportResult() {
     const payload = {
       sourceScript: script, analysis: result, storyboard, sceneHistory: scenes,
@@ -297,8 +315,31 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
+  function queueDeliveryTrackingSave(sceneId: string, statuses: Record<string, DeliveryShotStatus>) {
+    deliverySaveQueue.current = deliverySaveQueue.current.then(async () => {
+      const response = await fetch('/api/scenes', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneId, deliveryTracking: { statuses } }),
+      });
+      const payload = await response.json() as { tracking?: StoredScene['deliveryTracking']; error?: string };
+      if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
+      setScenes((current) => current.map((scene) => scene.id === sceneId
+        ? { ...scene, deliveryTracking: payload.tracking! }
+        : scene));
+      setNotice('制作进度已保存，刷新页面后仍可继续。');
+    }).catch((error) => {
+      setNotice(error instanceof Error ? error.message : '制作进度保存失败，请稍后重试。');
+    });
+  }
+
   function setDeliveryShotStatus(shotId: string, status: DeliveryShotStatus) {
-    setDeliveryShotStatuses((current) => ({ ...current, [shotId]: status }));
+    const next = { ...deliveryShotStatuses };
+    if (status === 'pending') delete next[shotId];
+    else next[shotId] = status;
+    setDeliveryShotStatuses(next);
+    if (activeSavedScene) queueDeliveryTrackingSave(activeSavedScene.id, next);
+    if (!activeSavedScene) setNotice('本页进度已更新；先保存场次状态，刷新后才能继续保留。');
   }
 
   async function copyPrompt() {
@@ -727,7 +768,7 @@ export default function Home() {
                       )}
                       <div className="mb-4 rounded-xl border border-border bg-card p-4">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div><p className="text-sm font-semibold">制作跟踪</p><p className="mt-1 text-xs text-muted-foreground">已提交 {deliveryTracking.submittedCount}/{deliveryTracking.total} · 已验收 {deliveryTracking.acceptedCount}/{deliveryTracking.total}</p></div>
+                          <div><p className="text-sm font-semibold">制作跟踪</p><p className="mt-1 text-xs text-muted-foreground">已提交 {deliveryTracking.submittedCount}/{deliveryTracking.total} · 已验收 {deliveryTracking.acceptedCount}/{deliveryTracking.total}</p><p className="mt-1 text-[11px] text-muted-foreground">{activeSavedScene ? `已关联第 ${activeSavedScene.sceneNumber} 场，进度自动保存` : '先保存场次状态，进度才能跨刷新保留'}</p></div>
                           <Badge variant="secondary" className={deliveryTracking.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : ''}>{deliveryTracking.complete ? '本场已验收' : `已验收 ${deliveryTracking.acceptedCount}/${deliveryTracking.total}`}</Badge>
                         </div>
                         <Progress value={deliveryTracking.total ? (deliveryTracking.acceptedCount / deliveryTracking.total) * 100 : 0} className="mt-3 [&_[data-slot=progress-indicator]]:bg-emerald-600" />
