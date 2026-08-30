@@ -147,6 +147,44 @@ export function addStoryboardRepairHistory(current: StoryboardResult, repaired: 
   return { ...repaired, issues: [...resolvedHistory, ...repaired.issues] };
 }
 
+export function buildFallbackStoryboard(analysis: AnalysisResult): Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'> {
+  const baseState: ShotState = {
+    characterPositions: '沿用剧本中的站位',
+    gazeDirection: '跟随当前交互对象',
+    propState: '沿用剧本中的道具状态',
+    spaceState: '沿用剧本中的场景空间',
+    timeState: '沿用剧本中的时间',
+  };
+  const shots: StoryboardShot[] = analysis.beats.map((beat, index) => {
+    const previous = index > 0 ? shots[index - 1] : undefined;
+    const startState = previous ? { ...previous.endState } : { ...baseState };
+    const endState = { ...startState };
+    return {
+      id: `S${String(index + 1).padStart(2, '0')}`,
+      beatId: beat.id,
+      durationSec: 4,
+      shotSize: index === 0 ? '中景' : '近景',
+      cameraAngle: '平视',
+      cameraMovement: '固定',
+      focus: `${beat.actor}与${beat.receiver}的交互`,
+      action: beat.action || '保持站位并对向当前交互对象',
+      dialogue: beat.dialogue || beat.response || '',
+      sound: '保留现场环境声，台词清晰可辨',
+      transition: index === 0 ? '建立镜头' : '连续承接',
+      startState,
+      endState,
+      continuityReason: index === 0 ? '建立场景' : '连续承接',
+      videoPrompt: `短剧写实镜头，${beat.actor}对${beat.receiver}执行一个清晰动作并完成回应；${beat.dialogue || beat.response || '无台词'}；保持人物身份、服装、道具、空间和时间连续。`,
+    };
+  });
+
+  return {
+    shots,
+    issues: [],
+    modelPrompt: '按镜头编号顺序执行；每镜头只完成一个主要动作，严格继承上一镜头结束状态，保持人物、道具、空间和时间连续。',
+  };
+}
+
 export function finalizeStoryboard(
   raw: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>,
   analysis: AnalysisResult,

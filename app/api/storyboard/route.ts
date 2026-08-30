@@ -1,6 +1,7 @@
 import type { AnalysisResult } from '@/lib/script-engine';
 import {
   addStoryboardRepairHistory,
+  buildFallbackStoryboard,
   enforceStoryboardRepairScope,
   finalizeStoryboard,
   getStoryboardRepairScope,
@@ -11,6 +12,7 @@ export const runtime = 'edge';
 
 const MODEL = 'deepseek-v4-flash';
 const API_URL = 'https://api.deepseek.com/responses';
+const MODEL_TIMEOUT_MS = 26000;
 const stateProperties = {
   characterPositions: { type: 'string' },
   gazeDirection: { type: 'string' },
@@ -156,26 +158,38 @@ export async function POST(request: Request) {
       ? `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}\n\n当前分镜：\n${JSON.stringify(body.current)}\n\nactiveIssues：\n${JSON.stringify(body.current.issues.filter((issue) => !issue.resolved))}\n\n修复范围：\n${JSON.stringify(scope)}`
       : `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}`;
 
-    const modelResponse = await fetch(API_URL, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL,
-        instructions: repairMode ? repairInstructions : instructions,
-        input,
-        reasoning: { effort: 'none' },
-        text: { format: { type: 'json_schema', name: 'short_drama_storyboard', schema: storyboardSchema } },
-        max_output_tokens: 12000,
-      }),
-    });
-    const payload = await modelResponse.json() as Record<string, unknown>;
-    if (!modelResponse.ok) {
-      console.error('DeepSeek storyboard failed', modelResponse.status);
-      return Response.json({ error: '分镜生成暂时不可用，请稍后再试。' }, { status: 502 });
+    let parsed: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>;
+    let usedFallback = false;
+    try {
+      const modelResponse = await fetch(API_URL, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: MODEL,
+          instructions: repairMode ? repairInstructions : instructions,
+          input,
+          reasoning: { effort: 'none' },
+          text: { format: { type: 'json_schema', name: 'short_drama_storyboard', schema: storyboardSchema } },
+          max_output_tokens: 9000,
+        }),
+        signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
+      });
+      const payload = await modelResponse.json() as Record<string, unknown>;
+      if (!modelResponse.ok) throw new Error(`DeepSeek storyboard status ${modelResponse.status}`);
+      const outputText = getOutputText(payload);
+      if (!outputText) throw new Error('DeepSeek storyboard returned no output');
+      parsed = parseOutput(outputText);
+    } catch (error) {
+      usedFallback = true;
+      console.warn('Storyboard AI unavailable, using rule fallback', error instanceof Error ? error.message : 'unknown error');
+      parsed = repairMode && body.current
+        ? {
+            shots: body.current.shots,
+            issues: body.current.issues.filter((issue) => !issue.resolved),
+            modelPrompt: body.current.modelPrompt,
+          }
+        : buildFallbackStoryboard(body.analysis);
     }
-    const outputText = getOutputText(payload);
-    if (!outputText) return Response.json({ error: '模型没有返回可用分镜。' }, { status: 502 });
-    const parsed = parseOutput(outputText);
     const scoped = repairMode && body.current && scope
       ? enforceStoryboardRepairScope(body.current, parsed, scope)
       : parsed;
@@ -186,8 +200,9 @@ export async function POST(request: Request) {
     return Response.json({
       result,
       meta: {
-        source: 'ai', provider: 'deepseek', model: MODEL,
+        source: usedFallback ? 'local' : 'ai', provider: usedFallback ? 'rules' : 'deepseek', model: MODEL,
         mode: repairMode ? 'repair' : 'generate',
+        fallback: usedFallback,
         editableShotIds: scope?.editableShotIds ?? [],
         lockedShotCount: scope?.lockedShotIds.length ?? 0,
       },
