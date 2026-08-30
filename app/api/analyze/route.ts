@@ -1,4 +1,6 @@
 import type { AnalysisResult } from '@/lib/script-engine';
+import { getLatestScene } from '@/lib/scene-db';
+import { sceneContinuityContext } from '@/lib/scene-state';
 
 export const runtime = 'edge';
 
@@ -78,7 +80,8 @@ const instructions = `你是短剧交互编译器，不是自由改写作者。�
 6. 台词保持口语化、简短、有潜台词，不重复已经明确的信息。
 7. issues 只记录具体、可定位的问题；targetId 指向节拍编号或 SCRIPT。
 8. executionPrompt 要完整列出修正后的节拍，并约束后续分镜模型保持人物、道具、空间和因果连续。
-9. 仅输出符合 JSON Schema 的数据；禁止 Markdown 代码块、注释、未加双引号的键和尾随逗号。`;
+9. 如果提供“上一场状态”，必须默认继承人物情绪、知情信息、道具、空间与时间；若新剧本开场与其冲突且没有明确变化过程，添加 hard continuity 问题并给出补桥建议。
+10. 仅输出符合 JSON Schema 的数据；禁止 Markdown 代码块、注释、未加双引号的键和尾随逗号。`;
 
 function getOutputText(payload: Record<string, unknown>) {
   if (typeof payload.output_text === 'string') return payload.output_text;
@@ -137,10 +140,20 @@ export async function POST(request: Request) {
     const apiKey = process.env.DEEPSEEK_API_KEY;
     if (!apiKey) return Response.json({ error: '模型服务尚未配置。' }, { status: 503 });
 
+    let previousScene = null;
+    try {
+      previousScene = await getLatestScene();
+    } catch (error) {
+      console.warn('Previous scene context unavailable', error instanceof Error ? error.message : 'unknown error');
+    }
+    const continuityContext = previousScene
+      ? `\n\n上一场状态（权威连续性约束）：\n${JSON.stringify(sceneContinuityContext(previousScene))}`
+      : '';
+
     const isRepair = body.mode === 'repair' && body.current;
     const input = isRepair
-      ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}`
-      : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。\n\n原始剧本：\n${script}`;
+      ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}${continuityContext}`
+      : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。${continuityContext}\n\n当前场原始剧本：\n${script}`;
 
     const modelResponse = await fetch(API_URL, {
       method: 'POST',
@@ -180,7 +193,11 @@ export async function POST(request: Request) {
 
     return Response.json({
       result: { ...result, analyzedAt: new Date().toISOString() },
-      meta: { source: 'ai', provider: 'deepseek', model: MODEL, mode: isRepair ? 'repair' : 'analyze' },
+      meta: {
+        source: 'ai', provider: 'deepseek', model: MODEL,
+        mode: isRepair ? 'repair' : 'analyze',
+        previousSceneNumber: previousScene?.sceneNumber ?? null,
+      },
     });
   } catch (error) {
     console.error('Script analysis failed', error instanceof Error ? error.message : 'unknown error');

@@ -3,19 +3,21 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, Check, ChevronRight, Clipboard, Download,
-  Camera, Clock, FileText, Film, GitBranch, Loader2, Play, RefreshCcw,
-  ScanSearch, Sparkles, Users,
+  Camera, Clock, Database, FileText, Film, GitBranch, Loader2, Play,
+  RefreshCcw, Save, ScanSearch, Sparkles, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import { Input } from '@/components/ui/input';
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
+import type { StoredScene } from '@/lib/scene-state';
 import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
 
 const sampleScript = `客厅，夜晚。
@@ -30,6 +32,7 @@ const pipeline = [
   { id: '04', label: '规则检查', icon: ScanSearch },
   { id: '05', label: '分镜生成', icon: Camera },
   { id: '06', label: '连续性验证', icon: Film },
+  { id: '07', label: '跨场继承', icon: Database },
 ];
 
 export default function Home() {
@@ -44,6 +47,10 @@ export default function Home() {
   const [isStoryboardRunning, setIsStoryboardRunning] = useState(false);
   const [storyboardCopied, setStoryboardCopied] = useState(false);
   const [storyboardLoopCount, setStoryboardLoopCount] = useState(0);
+  const [scenes, setScenes] = useState<StoredScene[]>([]);
+  const [sceneTitle, setSceneTitle] = useState('');
+  const [isSceneSaving, setIsSceneSaving] = useState(false);
+  const [previousSceneNumber, setPreviousSceneNumber] = useState<number | null>(null);
 
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
@@ -51,12 +58,26 @@ export default function Home() {
       setScript(saved);
       setResult(analyzeScript(saved));
     }
+    void loadScenes();
   }, []);
 
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving;
+  const latestScene = scenes[0] ?? null;
+  const hasHardStoryboardIssues = activeContinuityIssues.some((issue) => issue.severity === 'hard');
+  const canSaveScene = Boolean(storyboard) && hardIssues.length === 0 && !hasHardStoryboardIssues;
+
+  async function loadScenes() {
+    try {
+      const response = await fetch('/api/scenes');
+      const payload = await response.json() as { scenes?: StoredScene[] };
+      if (response.ok && payload.scenes) setScenes(payload.scenes);
+    } catch {
+      // The current-scene workflow remains usable if persistent history is temporarily unavailable.
+    }
+  }
 
   async function requestAI(body: Record<string, unknown>) {
     const response = await fetch('/api/analyze', {
@@ -64,8 +85,13 @@ export default function Home() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const payload = await response.json() as { result?: AnalysisResult; error?: string };
+    const payload = await response.json() as {
+      result?: AnalysisResult;
+      error?: string;
+      meta?: { previousSceneNumber?: number | null };
+    };
     if (!response.ok || !payload.result) throw new Error(payload.error || '智能分析失败');
+    setPreviousSceneNumber(payload.meta?.previousSceneNumber ?? null);
     return payload.result;
   }
 
@@ -162,8 +188,45 @@ export default function Home() {
     }
   }
 
+  async function saveSceneState() {
+    if (!storyboard || !canSaveScene || isSceneSaving) return;
+    setIsSceneSaving(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/scenes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: sceneTitle, script, analysis: result, storyboard }),
+      });
+      const payload = await response.json() as {
+        saved?: { sceneNumber: number; updated: boolean };
+        error?: string;
+      };
+      if (!response.ok || !payload.saved) throw new Error(payload.error || '场次状态保存失败');
+      await loadScenes();
+      setNotice(`第 ${payload.saved.sceneNumber} 场状态${payload.saved.updated ? '已更新' : '已保存'}，编译下一场时会自动继承。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '场次状态保存失败，请稍后重试。');
+    } finally {
+      setIsSceneSaving(false);
+    }
+  }
+
+  function startNextScene() {
+    setScript('');
+    setResult(analyzeScript(''));
+    setSource('local');
+    setLoopCount(0);
+    setStoryboard(null);
+    setStoryboardLoopCount(0);
+    setSceneTitle('');
+    setPreviousSceneNumber(latestScene?.sceneNumber ?? null);
+    setNotice(latestScene ? `已载入第 ${latestScene.sceneNumber} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
+    window.localStorage.setItem('scene-flow-script', '');
+  }
+
   function exportResult() {
-    const payload = { sourceScript: script, analysis: result, storyboard, exportedAt: new Date().toISOString() };
+    const payload = { sourceScript: script, analysis: result, storyboard, sceneHistory: scenes, exportedAt: new Date().toISOString() };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -204,6 +267,7 @@ export default function Home() {
               <span className={`size-1.5 rounded-full ${source === 'ai' ? 'bg-violet-500' : 'bg-emerald-500'}`} />
               {source === 'ai' ? 'DeepSeek 智能编译' : '本地规则备用'}
             </Badge>
+            {previousSceneNumber && <Badge variant="outline" className="hidden border-sky-200 bg-sky-50 text-sky-700 md:inline-flex">继承第 {previousSceneNumber} 场</Badge>}
             <Button variant="outline" onClick={exportResult}>
               <Download data-icon="inline-start" /> 导出执行包
             </Button>
@@ -265,10 +329,10 @@ export default function Home() {
             <Card className="border-0 ring-border">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2"><GitBranch className="size-4 text-primary" />工作流状态</CardTitle>
-                <CardDescription>第四阶段：定位分镜问题，锁定正确镜头，并在有限范围内循环修复。</CardDescription>
+                <CardDescription>第五阶段：保存本场结束状态，并将人物、道具、空间与时间约束传递给下一场。</CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-6">
+                <div className="grid gap-2 sm:grid-cols-3 xl:grid-cols-7">
                   {pipeline.map((step, index) => {
                     const Icon = step.icon;
                     return (
@@ -297,11 +361,12 @@ export default function Home() {
               <CardHeader className="border-b border-border/70 pb-3">
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
                   <div><CardTitle>AI执行结构</CardTitle><CardDescription>每项输出均可追溯到原剧本句子。</CardDescription></div>
-                  <TabsList>
+                  <TabsList className="h-auto flex-wrap">
                     <TabsTrigger value="beats">交互节拍</TabsTrigger>
                     <TabsTrigger value="issues">问题 {activeIssues.length > 0 && <span className="rounded-full bg-primary px-1.5 text-[10px] text-primary-foreground">{activeIssues.length}</span>}</TabsTrigger>
                     <TabsTrigger value="prompt">执行Prompt</TabsTrigger>
                     <TabsTrigger value="storyboard">分镜 {storyboard ? storyboard.shots.length : ''}</TabsTrigger>
+                    <TabsTrigger value="states">状态库 {scenes.length || ''}</TabsTrigger>
                   </TabsList>
                 </div>
               </CardHeader>
@@ -449,12 +514,71 @@ export default function Home() {
                   )}
                 </CardContent>
               </TabsContent>
+
+              <TabsContent value="states" className="m-0">
+                <CardContent className="py-4">
+                  <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50/60 p-4">
+                    <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-sky-950">跨场景状态数据库</p>
+                        <p className="mt-1 text-xs leading-5 text-sky-900">分镜确认后保存本场。下一场AI编译会自动继承最新人物、道具、空间和时间状态。</p>
+                        <Input aria-label="场次标题" value={sceneTitle} onChange={(event) => setSceneTitle(event.target.value)} className="mt-3 max-w-md bg-white" placeholder={`场次标题，例如：${scenes.length + 1}. 客厅对峙`} />
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Button onClick={saveSceneState} disabled={!canSaveScene || busy}>
+                          {isSceneSaving ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}
+                          {isSceneSaving ? '保存中…' : '保存本场状态'}
+                        </Button>
+                        <Button variant="outline" onClick={startNextScene} disabled={!latestScene || busy}>开始下一场</Button>
+                      </div>
+                    </div>
+                    {!storyboard && <p className="mt-3 text-xs text-sky-800">需要先生成分镜，系统才能取得准确的场景结束状态。</p>}
+                    {storyboard && !canSaveScene && <p className="mt-3 text-xs text-amber-800">请先解决剧本或分镜中的硬性问题，再把本场写入状态库。</p>}
+                  </div>
+
+                  {!latestScene ? (
+                    <div className="grid min-h-[430px] place-items-center rounded-xl border border-dashed border-border bg-muted/25 p-8 text-center">
+                      <div className="max-w-md">
+                        <span className="mx-auto mb-4 grid size-12 place-items-center rounded-2xl bg-sky-100 text-sky-700"><Database className="size-5" /></span>
+                        <h3 className="font-semibold">还没有已保存场次</h3>
+                        <p className="mt-2 text-sm leading-6 text-muted-foreground">完成第一场的分析、分镜和连续性检查后，把结束状态保存到这里。</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="max-h-[650px] space-y-3 overflow-y-auto pr-1">
+                      {scenes.map((scene, index) => (
+                        <article key={scene.id} className={`rounded-xl border p-4 ${index === 0 ? 'border-sky-200 bg-sky-50/35' : 'border-border bg-card'}`}>
+                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2"><Badge className="bg-sky-700">第 {scene.sceneNumber} 场</Badge><span className="text-sm font-semibold">{scene.title}</span>{index === 0 && <Badge variant="outline">当前继承源</Badge>}</div>
+                            <span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span>
+                          </div>
+                          <div className="grid gap-2 sm:grid-cols-3">
+                            <StateField label="空间 / 时间" value={`${scene.snapshot.spaceState} · ${scene.snapshot.timeState}`} />
+                            <StateField label="人物站位 / 视线" value={`${scene.snapshot.characterPositions} · ${scene.snapshot.gazeDirection}`} />
+                            <StateField label="道具状态" value={scene.snapshot.propState} />
+                          </div>
+                          <div className="mt-3 grid gap-2 lg:grid-cols-2">
+                            {scene.snapshot.characters.map((character) => (
+                              <div key={character.name} className="rounded-lg border border-border/80 bg-white/70 p-3 text-xs leading-5">
+                                <div className="flex items-center justify-between gap-2"><span className="font-semibold">{character.name}</span><Badge variant="outline">{character.emotionalState}</Badge></div>
+                                <p className="mt-1"><span className="text-muted-foreground">最后动作：</span>{character.lastAction}</p>
+                                <p><span className="text-muted-foreground">最后台词：</span>{character.lastDialogue}</p>
+                                <p className="mt-1 line-clamp-2"><span className="text-muted-foreground">已知信息：</span>{character.knownFacts.join('；') || '未明确'}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </TabsContent>
             </Tabs>
           </Card>
         </section>
 
         <footer className="mt-6 flex flex-col justify-between gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row">
-          <span>交互分析、分镜生成、连续性验证与受控修复 Loop 已串联。</span>
+          <span>交互分析、分镜修复与跨场景状态继承已串联。</span>
           <span className="flex items-center gap-1.5"><Sparkles className="size-3.5" />DeepSeek · 状态锁定 · 连续性规则</span>
         </footer>
       </div>
@@ -478,6 +602,15 @@ function ShotStateView({ label, state }: { label: string; state: ShotState }) {
       <p><span className="text-muted-foreground">视线：</span>{state.gazeDirection}</p>
       <p><span className="text-muted-foreground">道具：</span>{state.propState}</p>
       <p><span className="text-muted-foreground">空间/时间：</span>{state.spaceState} · {state.timeState}</p>
+    </div>
+  );
+}
+
+function StateField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-sky-100 bg-white/75 p-3 text-xs leading-5">
+      <p className="mb-1 font-semibold text-sky-950">{label}</p>
+      <p className="text-sky-900">{value}</p>
     </div>
   );
 }
