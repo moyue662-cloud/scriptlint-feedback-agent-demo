@@ -1,5 +1,5 @@
 import type { AnalysisResult } from '@/lib/script-engine';
-import { getLatestScene } from '@/lib/scene-db';
+import { getEpisodeSummary, getLatestScene } from '@/lib/scene-db';
 import { sceneContinuityContext } from '@/lib/scene-state';
 
 export const runtime = 'edge';
@@ -133,6 +133,7 @@ export async function POST(request: Request) {
       mode?: 'analyze' | 'repair';
       current?: AnalysisResult;
       loopCount?: number;
+      episodeNumber?: number;
     };
     const script = body.script?.trim() ?? '';
     if (!script) return Response.json({ error: '请输入剧本后再分析。' }, { status: 400 });
@@ -150,11 +151,28 @@ export async function POST(request: Request) {
     const continuityContext = previousScene
       ? `\n\n上一场状态（权威连续性约束）：\n${JSON.stringify(sceneContinuityContext(previousScene))}`
       : '';
+    let episodeSummary = null;
+    if (body.episodeNumber) {
+      try {
+        episodeSummary = await getEpisodeSummary(body.episodeNumber);
+      } catch (error) {
+        console.warn('Episode summary context unavailable', error instanceof Error ? error.message : 'unknown error');
+      }
+    }
+    const episodeSummaryContext = episodeSummary
+      ? `\n\n本集创作约束（辅助上下文，不能覆盖原始剧本事实）：\n${JSON.stringify({
+          episodeNumber: episodeSummary.episodeNumber,
+          title: episodeSummary.title,
+          objective: episodeSummary.objective,
+          conflict: episodeSummary.conflict,
+          notes: episodeSummary.notes,
+        })}`
+      : '';
 
     const isRepair = body.mode === 'repair' && body.current;
     const input = isRepair
-      ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}${continuityContext}`
-      : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。${continuityContext}\n\n当前场原始剧本：\n${script}`;
+      ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}${continuityContext}${episodeSummaryContext}`
+      : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。${continuityContext}${episodeSummaryContext}\n\n当前场原始剧本：\n${script}`;
 
     let modelResponse: Response;
     try {

@@ -1,9 +1,9 @@
 import { env } from 'cloudflare:workers';
 
-import { createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql } from '@/db/schema';
+import { createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql } from '@/db/schema';
 import { buildSceneProductionSummary, DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type {
-  DeliveryShotStatus, DeliveryTrackingState, SceneProject,
+  DeliveryShotStatus, DeliveryTrackingState, EpisodeSummary, SceneProject,
   SceneSnapshot, StoredScene, StoredSceneDetail,
 } from '@/lib/scene-state';
 import type { AnalysisResult } from '@/lib/script-engine';
@@ -31,6 +31,16 @@ interface ProjectRow {
   updated_at: string;
 }
 
+interface EpisodeSummaryRow {
+  project_id: string;
+  episode_number: number;
+  title: string;
+  objective: string;
+  conflict: string;
+  notes: string;
+  updated_at: string;
+}
+
 function database() {
   return (env as unknown as { DB: D1Database }).DB;
 }
@@ -41,6 +51,7 @@ async function ensureSchema() {
   schemaPromise ??= (async () => {
     const db = database();
     await db.prepare(createProjectsTableSql).run();
+    await db.prepare(createEpisodeSummariesTableSql).run();
     await db.prepare(createSceneStatesTableSql).run();
     const columns = await db.prepare('PRAGMA table_info(scene_states)').all<{ name: string }>();
     if (!columns.results.some((column) => column.name === 'delivery_tracking_json')) {
@@ -87,6 +98,18 @@ function toSceneProject(row: ProjectRow): SceneProject {
     id: row.id,
     name: row.name,
     createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function toEpisodeSummary(row: EpisodeSummaryRow): EpisodeSummary {
+  return {
+    projectId: row.project_id || DEFAULT_PROJECT_ID,
+    episodeNumber: Math.max(1, Number(row.episode_number) || 1),
+    title: row.title || '',
+    objective: row.objective || '',
+    conflict: row.conflict || '',
+    notes: row.notes || '',
     updatedAt: row.updated_at,
   };
 }
@@ -152,6 +175,55 @@ export async function updateProjectName(name: string, id = DEFAULT_PROJECT_ID) {
     'UPDATE projects SET name = ?, updated_at = ? WHERE id = ?',
   ).bind(trimmed, updatedAt, id).run();
   return getProject(id);
+}
+
+export async function listEpisodeSummaries(projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const result = await database().prepare(
+    `SELECT project_id, episode_number, title, objective, conflict, notes, updated_at
+     FROM episode_summaries WHERE project_id = ? ORDER BY episode_number ASC`,
+  ).bind(projectId).all<EpisodeSummaryRow>();
+  return result.results.map(toEpisodeSummary);
+}
+
+export async function getEpisodeSummary(episodeNumber: number, projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const normalizedEpisodeNumber = Math.max(1, Math.min(999, Math.round(Number(episodeNumber) || 1)));
+  const row = await database().prepare(
+    `SELECT project_id, episode_number, title, objective, conflict, notes, updated_at
+     FROM episode_summaries WHERE project_id = ? AND episode_number = ?`,
+  ).bind(projectId, normalizedEpisodeNumber).first<EpisodeSummaryRow>();
+  return row ? toEpisodeSummary(row) : null;
+}
+
+export async function upsertEpisodeSummary(input: {
+  projectId?: string;
+  episodeNumber: number;
+  title?: string;
+  objective?: string;
+  conflict?: string;
+  notes?: string;
+}) {
+  await ensureSchema();
+  const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
+  const episodeNumber = Math.max(1, Math.min(999, Math.round(Number(input.episodeNumber) || 1)));
+  const title = input.title?.trim().slice(0, 120) || '';
+  const objective = input.objective?.trim().slice(0, 500) || '';
+  const conflict = input.conflict?.trim().slice(0, 500) || '';
+  const notes = input.notes?.trim().slice(0, 1000) || '';
+  const updatedAt = new Date().toISOString();
+  await database().prepare(
+    `INSERT INTO episode_summaries (project_id, episode_number, title, objective, conflict, notes, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(project_id, episode_number) DO UPDATE SET
+       title = excluded.title, objective = excluded.objective, conflict = excluded.conflict,
+       notes = excluded.notes, updated_at = excluded.updated_at`,
+  ).bind(projectId, episodeNumber, title, objective, conflict, notes, updatedAt).run();
+  const row = await database().prepare(
+    `SELECT project_id, episode_number, title, objective, conflict, notes, updated_at
+     FROM episode_summaries WHERE project_id = ? AND episode_number = ?`,
+  ).bind(projectId, episodeNumber).first<EpisodeSummaryRow>();
+  return row ? toEpisodeSummary(row) : null;
 }
 
 export async function listScenes(projectId = DEFAULT_PROJECT_ID, limit = 30) {

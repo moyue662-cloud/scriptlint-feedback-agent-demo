@@ -46,6 +46,16 @@ export interface SceneProject {
   updatedAt: string;
 }
 
+export interface EpisodeSummary {
+  projectId: string;
+  episodeNumber: number;
+  title: string;
+  objective: string;
+  conflict: string;
+  notes: string;
+  updatedAt: string;
+}
+
 export interface StoredScene {
   id: string;
   projectId: string;

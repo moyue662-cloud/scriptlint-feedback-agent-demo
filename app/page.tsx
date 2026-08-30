@@ -19,7 +19,7 @@ import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
-import type { DeliveryShotStatus, SceneProductionStatus, SceneProject, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
+import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import {
   buildFallbackStoryboard, finalizeStoryboard, type ShotState, type StoryboardResult,
 } from '@/lib/storyboard-engine';
@@ -52,6 +52,9 @@ const AI_REQUEST_TIMEOUT_MS = 30000;
 const PIPELINE_LOOP_LIMIT = 3;
 
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
+type EpisodeSummaryDraft = Pick<EpisodeSummary, 'title' | 'objective' | 'conflict' | 'notes'>;
+
+const emptyEpisodeSummaryDraft: EpisodeSummaryDraft = { title: '', objective: '', conflict: '', notes: '' };
 const pipelinePhaseLabels: Record<PipelinePhase, string> = {
   idle: '未运行', analyzing: '分析剧本', repairing_script: '修复剧本结构',
   generating_storyboard: '生成分镜', repairing_storyboard: '修复分镜连续性',
@@ -85,12 +88,16 @@ export default function Home() {
   const [storyboardCopied, setStoryboardCopied] = useState(false);
   const [storyboardLoopCount, setStoryboardLoopCount] = useState(0);
   const [scenes, setScenes] = useState<StoredScene[]>([]);
+  const [episodeSummaries, setEpisodeSummaries] = useState<EpisodeSummary[]>([]);
+  const [summaryEpisode, setSummaryEpisode] = useState<number | null>(null);
+  const [episodeSummaryDrafts, setEpisodeSummaryDrafts] = useState<Record<number, EpisodeSummaryDraft>>({});
   const [sceneTitle, setSceneTitle] = useState('');
   const [episodeNumber, setEpisodeNumber] = useState(1);
   const [selectedEpisode, setSelectedEpisode] = useState<number | 'all'>('all');
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
   const [isSceneReordering, setIsSceneReordering] = useState(false);
+  const [isEpisodeSummarySaving, setIsEpisodeSummarySaving] = useState(false);
   const [draggingSceneId, setDraggingSceneId] = useState<string | null>(null);
   const [dragOverSceneId, setDragOverSceneId] = useState<string | null>(null);
   const [project, setProject] = useState<SceneProject | null>(null);
@@ -113,6 +120,16 @@ export default function Home() {
       if (response.ok && payload.scenes) setScenes(payload.scenes);
     } catch {
       // The current-scene workflow remains usable if persistent history is temporarily unavailable.
+    }
+  }
+
+  async function loadEpisodeSummaries() {
+    try {
+      const response = await fetch('/api/episodes');
+      const payload = await response.json() as { summaries?: EpisodeSummary[] };
+      if (response.ok && payload.summaries) setEpisodeSummaries(payload.summaries);
+    } catch {
+      // Episode summaries are non-blocking; the scene workflow remains usable if they are unavailable.
     }
   }
 
@@ -181,6 +198,45 @@ export default function Home() {
     }
   }
 
+  function updateEpisodeSummaryDraft(field: keyof EpisodeSummaryDraft, value: string) {
+    if (!activeSummaryEpisode) return;
+    setEpisodeSummaryDrafts((current) => ({
+      ...current,
+      [activeSummaryEpisode]: {
+        ...(current[activeSummaryEpisode] ?? activeEpisodeSummaryDraft),
+        [field]: value,
+      },
+    }));
+  }
+
+  async function saveEpisodeSummary() {
+    if (!activeSummaryEpisode || isEpisodeSummarySaving || busy) return;
+    setIsEpisodeSummarySaving(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/episodes', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          episodeNumber: activeSummaryEpisode,
+          ...activeEpisodeSummaryDraft,
+        }),
+      });
+      const payload = await response.json() as { summary?: EpisodeSummary; error?: string };
+      if (!response.ok || !payload.summary) throw new Error(payload.error || '集数总结保存失败');
+      const savedSummary = payload.summary;
+      setEpisodeSummaries((current) => [
+        ...current.filter((summary) => summary.episodeNumber !== savedSummary.episodeNumber),
+        savedSummary,
+      ].sort((a, b) => a.episodeNumber - b.episodeNumber));
+      setNotice(`第 ${activeSummaryEpisode} 集总结已保存。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '集数总结保存失败，请稍后重试。');
+    } finally {
+      setIsEpisodeSummarySaving(false);
+    }
+  }
+
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
     if (saved) {
@@ -188,13 +244,14 @@ export default function Home() {
       setResult(analyzeScript(saved));
     }
     void loadScenes();
+    void loadEpisodeSummaries();
     void loadProject();
   }, []);
 
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isPipelineRunning || isProjectSaving;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isEpisodeSummarySaving || isPipelineRunning || isProjectSaving;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -242,6 +299,21 @@ export default function Home() {
     () => Array.from(new Set(scenes.map((scene) => scene.episodeNumber))).sort((a, b) => a - b),
     [scenes],
   );
+  const activeSummaryEpisode = summaryEpisode && episodeOptions.includes(summaryEpisode)
+    ? summaryEpisode
+    : episodeOptions[0] ?? null;
+  const activeEpisodeSummary = activeSummaryEpisode
+    ? episodeSummaries.find((summary) => summary.episodeNumber === activeSummaryEpisode) ?? null
+    : null;
+
+  const activeEpisodeSummaryDraft = activeSummaryEpisode
+    ? episodeSummaryDrafts[activeSummaryEpisode] ?? {
+        title: activeEpisodeSummary?.title ?? '',
+        objective: activeEpisodeSummary?.objective ?? '',
+        conflict: activeEpisodeSummary?.conflict ?? '',
+        notes: activeEpisodeSummary?.notes ?? '',
+      }
+    : emptyEpisodeSummaryDraft;
   const activeSavedScene = useMemo(
     () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
     [scenes, script],
@@ -272,7 +344,7 @@ export default function Home() {
     const response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, episodeNumber }),
       signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
     });
     const payload = await response.json() as {
@@ -1025,10 +1097,71 @@ export default function Home() {
                         <Button variant="outline" onClick={startNextScene} disabled={!latestScene || busy}>开始下一场</Button>
                       </div>
                     </div>
-                    {!storyboard && <p className="mt-3 text-xs text-sky-800">需要先生成分镜，系统才能取得准确的场景结束状态。</p>}
-                    {storyboard && !allShotsReviewed && <p className="mt-3 text-xs text-violet-800">请先完成全部镜头的人工确认，再把本场写入状态库。</p>}
-                    {storyboard && allShotsReviewed && !canSaveScene && <p className="mt-3 text-xs text-amber-800">请先解决剧本或分镜中的硬性问题，再把本场写入状态库。</p>}
+                  {!storyboard && <p className="mt-3 text-xs text-sky-800">需要先生成分镜，系统才能取得准确的场景结束状态。</p>}
+                  {storyboard && !allShotsReviewed && <p className="mt-3 text-xs text-violet-800">请先完成全部镜头的人工确认，再把本场写入状态库。</p>}
+                  {storyboard && allShotsReviewed && !canSaveScene && <p className="mt-3 text-xs text-amber-800">请先解决剧本或分镜中的硬性问题，再把本场写入状态库。</p>}
                   </div>
+
+                  {episodeOptions.length > 0 && (
+                    <div className="mb-4 rounded-xl border border-violet-200 bg-violet-50/60 p-4">
+                      <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-violet-950">集数总结</p>
+                          <p className="mt-1 text-xs leading-5 text-violet-900">记录本集的戏剧目标、核心冲突和制作备注，作为后续编译与人工复核的辅助上下文。</p>
+                        </div>
+                        <NativeSelect
+                          value={activeSummaryEpisode ? String(activeSummaryEpisode) : ''}
+                          onChange={(event) => setSummaryEpisode(Number(event.target.value))}
+                          aria-label="编辑哪一集的总结"
+                          className="w-full bg-white lg:w-36"
+                          disabled={busy}
+                        >
+                          {episodeOptions.map((episode) => <NativeSelectOption key={episode} value={String(episode)}>第 {episode} 集</NativeSelectOption>)}
+                        </NativeSelect>
+                      </div>
+                      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+                        <Input
+                          aria-label="本集总结标题"
+                          value={activeEpisodeSummaryDraft.title}
+                          onChange={(event) => updateEpisodeSummaryDraft('title', event.target.value)}
+                          placeholder="本集标题，例如：辞职真相浮出水面"
+                          className="bg-white"
+                          disabled={busy}
+                        />
+                        <Input
+                          aria-label="本集戏剧目标"
+                          value={activeEpisodeSummaryDraft.objective}
+                          onChange={(event) => updateEpisodeSummaryDraft('objective', event.target.value)}
+                          placeholder="本集要让观众看到什么变化？"
+                          className="bg-white"
+                          disabled={busy}
+                        />
+                        <Textarea
+                          aria-label="本集核心冲突"
+                          value={activeEpisodeSummaryDraft.conflict}
+                          onChange={(event) => updateEpisodeSummaryDraft('conflict', event.target.value)}
+                          placeholder="本集核心冲突或必须推进的矛盾"
+                          className="min-h-20 bg-white"
+                          disabled={busy}
+                        />
+                        <Textarea
+                          aria-label="本集制作备注"
+                          value={activeEpisodeSummaryDraft.notes}
+                          onChange={(event) => updateEpisodeSummaryDraft('notes', event.target.value)}
+                          placeholder="给编剧、分镜或视频制作的备注"
+                          className="min-h-20 bg-white"
+                          disabled={busy}
+                        />
+                      </div>
+                      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+                        <p className="text-[11px] text-violet-800">保存后会跨刷新保留，不会自动改写已保存场次。</p>
+                        <Button onClick={saveEpisodeSummary} disabled={busy || !activeSummaryEpisode}>
+                          {isEpisodeSummarySaving ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}
+                          {isEpisodeSummarySaving ? '保存中…' : '保存本集总结'}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
 
                   {scenes.length > 0 && (
                     <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
@@ -1076,7 +1209,7 @@ export default function Home() {
                       <div className="mt-4 space-y-4">
                         {visibleTimeline.episodes.map((episode) => (
                           <section key={episode.episodeNumber} className="rounded-lg border border-indigo-100 bg-white/55 p-3">
-                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场</p><p className="mt-1 text-[11px] text-indigo-700">{episode.scenes.reduce((total, scene) => total + scene.summary.durationSec, 0)}秒 · {episode.scenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0)}项待修 · {episode.scenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0)}/{episode.scenes.reduce((total, scene) => total + scene.summary.shotCount, 0)}镜头已验收</p></div><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
+                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场{episodeSummaries.find((summary) => summary.episodeNumber === episode.episodeNumber)?.title ? ` · ${episodeSummaries.find((summary) => summary.episodeNumber === episode.episodeNumber)?.title}` : ''}</p><p className="mt-1 text-[11px] text-indigo-700">{episode.scenes.reduce((total, scene) => total + scene.summary.durationSec, 0)}秒 · {episode.scenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0)}项待修 · {episode.scenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0)}/{episode.scenes.reduce((total, scene) => total + scene.summary.shotCount, 0)}镜头已验收</p></div><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
                             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                               {episode.scenes.map((scene, index) => (
                                 <div
