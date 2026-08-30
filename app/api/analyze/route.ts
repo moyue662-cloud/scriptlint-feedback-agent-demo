@@ -78,7 +78,7 @@ const instructions = `你是短剧交互编译器，不是自由改写作者。�
 6. 台词保持口语化、简短、有潜台词，不重复已经明确的信息。
 7. issues 只记录具体、可定位的问题；targetId 指向节拍编号或 SCRIPT。
 8. executionPrompt 要完整列出修正后的节拍，并约束后续分镜模型保持人物、道具、空间和因果连续。
-9. 仅输出符合 JSON Schema 的数据。`;
+9. 仅输出符合 JSON Schema 的数据；禁止 Markdown 代码块、注释、未加双引号的键和尾随逗号。`;
 
 function getOutputText(payload: Record<string, unknown>) {
   if (typeof payload.output_text === 'string') return payload.output_text;
@@ -96,6 +96,30 @@ function getOutputText(payload: Record<string, unknown>) {
     }
   }
   return '';
+}
+
+function parseStructuredOutput(outputText: string) {
+  const unfenced = outputText
+    .replace(/^\uFEFF/, '')
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+  const firstBrace = unfenced.indexOf('{');
+  const lastBrace = unfenced.lastIndexOf('}');
+  const objectText = firstBrace >= 0 && lastBrace > firstBrace
+    ? unfenced.slice(firstBrace, lastBrace + 1)
+    : unfenced;
+
+  try {
+    return JSON.parse(objectText) as Omit<AnalysisResult, 'analyzedAt'>;
+  } catch {
+    const repaired = objectText
+      .replace(/^\s*\/\/.*$/gm, '')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');
+    return JSON.parse(repaired) as Omit<AnalysisResult, 'analyzedAt'>;
+  }
 }
 
 export async function POST(request: Request) {
@@ -152,7 +176,7 @@ export async function POST(request: Request) {
 
     const outputText = getOutputText(payload);
     if (!outputText) return Response.json({ error: '模型没有返回可用的结构化结果。' }, { status: 502 });
-    const result = JSON.parse(outputText) as Omit<AnalysisResult, 'analyzedAt'>;
+    const result = parseStructuredOutput(outputText);
 
     return Response.json({
       result: { ...result, analyzedAt: new Date().toISOString() },
