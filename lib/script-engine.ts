@@ -5,7 +5,11 @@ export type IssueType =
   | 'abstract_emotion'
   | 'missing_response'
   | 'weak_action'
-  | 'knowledge_risk';
+  | 'knowledge_risk'
+  | 'emotion_jump'
+  | 'continuity'
+  | 'dialogue_logic'
+  | 'character_consistency';
 
 export interface InteractionBeat {
   id: string;
@@ -41,6 +45,8 @@ export interface AnalysisResult {
   executionPrompt: string;
   analyzedAt: string;
 }
+
+export type AnalysisSource = 'ai' | 'local';
 
 const emotionActions: Record<string, string> = {
   生气: '攥紧手中的物品，呼吸变重，直视对方后再开口',

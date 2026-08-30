@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, Check, ChevronRight, Clipboard, Download,
-  FileText, Film, GitBranch, Play, RefreshCcw, ScanSearch, Sparkles, Users,
+  FileText, Film, GitBranch, Loader2, Play, RefreshCcw, ScanSearch, Sparkles, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -12,7 +12,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Progress } from '@/components/ui/progress';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
-import { analyzeScript, repairAnalysis, type AnalysisResult } from '@/lib/script-engine';
+import {
+  analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
+} from '@/lib/script-engine';
 
 const sampleScript = `客厅，夜晚。
 林晓发现桌上父亲的辞职通知书，很生气地质问父亲：“你什么时候辞职的？”
@@ -31,6 +33,9 @@ export default function Home() {
   const [result, setResult] = useState<AnalysisResult>(() => analyzeScript(sampleScript));
   const [loopCount, setLoopCount] = useState(0);
   const [copied, setCopied] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [source, setSource] = useState<AnalysisSource>('local');
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
@@ -43,17 +48,55 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
 
-  function runAnalysis() {
-    const next = analyzeScript(script);
-    setResult(next);
-    setLoopCount(0);
-    window.localStorage.setItem('scene-flow-script', script);
+  async function requestAI(body: Record<string, unknown>) {
+    const response = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json() as { result?: AnalysisResult; error?: string };
+    if (!response.ok || !payload.result) throw new Error(payload.error || '智能分析失败');
+    return payload.result;
   }
 
-  function runRepairLoop() {
-    if (loopCount >= 3 || activeIssues.length === 0) return;
-    setResult((current) => repairAnalysis(current));
-    setLoopCount((current) => current + 1);
+  async function runAnalysis() {
+    setIsRunning(true);
+    setNotice('');
+    window.localStorage.setItem('scene-flow-script', script);
+    try {
+      const next = await requestAI({ script, mode: 'analyze' });
+      setResult(next);
+      setSource('ai');
+      setLoopCount(0);
+    } catch (error) {
+      setResult(analyzeScript(script));
+      setSource('local');
+      setLoopCount(0);
+      setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}，已切换到本地规则结果。`);
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
+  async function runRepairLoop() {
+    if (loopCount >= 3 || activeIssues.length === 0 || isRunning) return;
+    setIsRunning(true);
+    setNotice('');
+    try {
+      const next = await requestAI({
+        script, mode: 'repair', current: result, loopCount: loopCount + 1,
+      });
+      setResult(next);
+      setSource('ai');
+      setLoopCount((current) => current + 1);
+    } catch (error) {
+      setResult((current) => repairAnalysis(current));
+      setSource('local');
+      setLoopCount((current) => current + 1);
+      setNotice(`${error instanceof Error ? error.message : '智能修复暂时不可用'}，本轮已由本地规则完成。`);
+    } finally {
+      setIsRunning(false);
+    }
   }
 
   function exportResult() {
@@ -87,8 +130,9 @@ export default function Home() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Badge variant="outline" className="hidden border-emerald-200 bg-emerald-50 text-emerald-700 sm:inline-flex">
-              <span className="size-1.5 rounded-full bg-emerald-500" /> 本地规则引擎
+            <Badge variant="outline" className={`hidden sm:inline-flex ${source === 'ai' ? 'border-violet-200 bg-violet-50 text-violet-700' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}`}>
+              <span className={`size-1.5 rounded-full ${source === 'ai' ? 'bg-violet-500' : 'bg-emerald-500'}`} />
+              {source === 'ai' ? 'DeepSeek 智能编译' : '本地规则备用'}
             </Badge>
             <Button variant="outline" onClick={exportResult}>
               <Download data-icon="inline-start" /> 导出执行包
@@ -131,12 +175,18 @@ export default function Home() {
                   className="min-h-[310px] resize-y border-0 bg-[#f8f4ed] p-4 font-[var(--font-script)] text-[15px] leading-8 shadow-inner focus-visible:ring-primary/20"
                   placeholder="在这里输入一场戏……"
                 />
+                {notice && (
+                  <div role="status" className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
+                    <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />{notice}
+                  </div>
+                )}
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                   <button className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" onClick={() => setScript(sampleScript)}>
                     恢复示例剧本
                   </button>
-                  <Button size="lg" onClick={runAnalysis} disabled={!script.trim()} className="px-4">
-                    <Play data-icon="inline-start" className="fill-current" /> 编译这场戏
+                  <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || isRunning} className="px-4">
+                    {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
+                    {isRunning ? '智能编译中…' : 'AI 编译这场戏'}
                   </Button>
                 </div>
               </CardContent>
@@ -145,7 +195,7 @@ export default function Home() {
             <Card className="border-0 ring-border">
               <CardHeader>
                 <CardTitle className="flex items-center gap-2"><GitBranch className="size-4 text-primary" />工作流状态</CardTitle>
-                <CardDescription>当前为第一阶段：文字剧本结构化与规则验证。</CardDescription>
+                <CardDescription>第二阶段：大模型结构化编译，并由本地规则提供安全备用。</CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="grid gap-2 sm:grid-cols-4">
@@ -215,7 +265,10 @@ export default function Home() {
                 <CardContent className="py-4">
                   <div className="mb-4 flex items-center justify-between gap-4 rounded-xl bg-[#f8f4ed] p-4">
                     <div><p className="text-sm font-semibold">受控修复循环</p><p className="mt-1 text-xs text-muted-foreground">仅修改已定位的问题，最多运行3轮。</p></div>
-                    <Button onClick={runRepairLoop} disabled={activeIssues.length === 0 || loopCount >= 3}><RefreshCcw data-icon="inline-start" />运行修复 Loop</Button>
+                    <Button onClick={runRepairLoop} disabled={activeIssues.length === 0 || loopCount >= 3 || isRunning}>
+                      {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <RefreshCcw data-icon="inline-start" />}
+                      {isRunning ? '修复中…' : '运行修复 Loop'}
+                    </Button>
                   </div>
                   <div className="space-y-3">
                     {result.issues.map((issue) => (
@@ -250,8 +303,8 @@ export default function Home() {
         </section>
 
         <footer className="mt-6 flex flex-col justify-between gap-2 border-t border-border py-5 text-xs text-muted-foreground sm:flex-row">
-          <span>当前版本不调用外部模型，所有分析在浏览器本地演示。</span>
-          <span className="flex items-center gap-1.5"><Sparkles className="size-3.5" />下一阶段：接入结构化大模型输出</span>
+          <span>智能模式使用结构化模型输出；异常时自动切换本地规则。</span>
+          <span className="flex items-center gap-1.5"><Sparkles className="size-3.5" />DeepSeek Responses API · 受控修复 Loop</span>
         </footer>
       </div>
     </main>

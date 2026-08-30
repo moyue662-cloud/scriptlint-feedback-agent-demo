@@ -1,0 +1,165 @@
+import type { AnalysisResult } from '@/lib/script-engine';
+
+export const runtime = 'edge';
+
+const MODEL = 'deepseek-v4-pro';
+const API_URL = 'https://api.deepseek.com/responses';
+const issueTypes = [
+  'missing_character', 'abstract_emotion', 'missing_response', 'weak_action',
+  'knowledge_risk', 'emotion_jump', 'continuity', 'dialogue_logic',
+  'character_consistency',
+];
+
+const analysisSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    characters: { type: 'array', items: { type: 'string' }, maxItems: 12 },
+    beats: {
+      type: 'array',
+      minItems: 1,
+      maxItems: 30,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          source: { type: 'string' },
+          actor: { type: 'string' },
+          receiver: { type: 'string' },
+          trigger: { type: 'string' },
+          goal: { type: 'string' },
+          action: { type: 'string' },
+          dialogue: { type: 'string' },
+          reaction: { type: 'string' },
+          response: { type: 'string' },
+          stateBefore: { type: 'string' },
+          stateAfter: { type: 'string' },
+        },
+        required: [
+          'id', 'source', 'actor', 'receiver', 'trigger', 'goal', 'action',
+          'dialogue', 'reaction', 'response', 'stateBefore', 'stateAfter',
+        ],
+      },
+    },
+    issues: {
+      type: 'array',
+      maxItems: 40,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          severity: { type: 'string', enum: ['hard', 'soft'] },
+          type: { type: 'string', enum: issueTypes },
+          targetId: { type: 'string' },
+          title: { type: 'string' },
+          detail: { type: 'string' },
+          suggestion: { type: 'string' },
+          resolved: { type: 'boolean' },
+        },
+        required: ['id', 'severity', 'type', 'targetId', 'title', 'detail', 'suggestion', 'resolved'],
+      },
+    },
+    score: { type: 'integer', minimum: 0, maximum: 100 },
+    executionPrompt: { type: 'string' },
+  },
+  required: ['characters', 'beats', 'issues', 'score', 'executionPrompt'],
+} as const;
+
+const instructions = `你是短剧交互编译器，不是自由改写作者。你的任务是把中文原始剧本转换为可拍摄、可验证、可供视频模型执行的交互节拍。
+
+必须遵守：
+1. 不改变核心事实、人物关系、事件顺序和结局倾向。
+2. 每个节拍都要有：触发、人物目标、一个可见动作、台词、对方即时反应、回应、前后状态。
+3. 抽象情绪必须落到微动作、视线、停顿、距离或语气，禁止夸张堆砌动作。
+4. 对方的反应必须明确承接上一句台词或动作；状态变化必须有可观察原因。
+5. 人物不能使用自己尚未知晓的信息；道具、站位和时间线必须连续。
+6. 台词保持口语化、简短、有潜台词，不重复已经明确的信息。
+7. issues 只记录具体、可定位的问题；targetId 指向节拍编号或 SCRIPT。
+8. executionPrompt 要完整列出修正后的节拍，并约束后续分镜模型保持人物、道具、空间和因果连续。
+9. 仅输出符合 JSON Schema 的数据。`;
+
+function getOutputText(payload: Record<string, unknown>) {
+  if (typeof payload.output_text === 'string') return payload.output_text;
+  const output = Array.isArray(payload.output) ? payload.output : [];
+  for (const item of output) {
+    if (!item || typeof item !== 'object') continue;
+    const content = Array.isArray((item as { content?: unknown[] }).content)
+      ? (item as { content: unknown[] }).content
+      : [];
+    for (const part of content) {
+      if (part && typeof part === 'object' && (part as { type?: string }).type === 'output_text') {
+        const text = (part as { text?: unknown }).text;
+        if (typeof text === 'string') return text;
+      }
+    }
+  }
+  return '';
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json() as {
+      script?: string;
+      mode?: 'analyze' | 'repair';
+      current?: AnalysisResult;
+      loopCount?: number;
+    };
+    const script = body.script?.trim() ?? '';
+    if (!script) return Response.json({ error: '请输入剧本后再分析。' }, { status: 400 });
+    if (script.length > 12000) return Response.json({ error: '单次剧本请控制在 12000 字以内。' }, { status: 400 });
+
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) return Response.json({ error: '模型服务尚未配置。' }, { status: 503 });
+
+    const isRepair = body.mode === 'repair' && body.current;
+    const input = isRepair
+      ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}`
+      : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。\n\n原始剧本：\n${script}`;
+
+    const modelResponse = await fetch(API_URL, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        instructions,
+        input,
+        reasoning: { effort: 'low' },
+        text: {
+          format: {
+            type: 'json_schema',
+            name: 'short_drama_interaction_analysis',
+            schema: analysisSchema,
+          },
+        },
+        max_output_tokens: 10000,
+        store: false,
+      }),
+    });
+
+    const payload = await modelResponse.json() as Record<string, unknown>;
+    if (!modelResponse.ok) {
+      const apiError = payload.error && typeof payload.error === 'object'
+        ? (payload.error as { message?: string }).message
+        : undefined;
+      console.error('DeepSeek response failed', modelResponse.status, apiError ?? 'unknown error');
+      return Response.json({ error: '智能分析暂时不可用，请稍后再试。' }, { status: 502 });
+    }
+
+    const outputText = getOutputText(payload);
+    if (!outputText) return Response.json({ error: '模型没有返回可用的结构化结果。' }, { status: 502 });
+    const result = JSON.parse(outputText) as Omit<AnalysisResult, 'analyzedAt'>;
+
+    return Response.json({
+      result: { ...result, analyzedAt: new Date().toISOString() },
+      meta: { source: 'ai', provider: 'deepseek', model: MODEL, mode: isRepair ? 'repair' : 'analyze' },
+    });
+  } catch (error) {
+    console.error('Script analysis failed', error instanceof Error ? error.message : 'unknown error');
+    return Response.json({ error: '剧本分析失败，请检查内容后重试。' }, { status: 500 });
+  }
+}
