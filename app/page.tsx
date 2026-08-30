@@ -18,6 +18,7 @@ import { Textarea } from '@/components/ui/textarea';
 import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
+import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import {
@@ -41,6 +42,16 @@ const sceneStatusClasses: Record<SceneProductionStatus, string> = {
   'needs-review': 'border-amber-200 bg-amber-50 text-amber-800',
   'in-production': 'border-sky-200 bg-sky-50 text-sky-800',
   completed: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+};
+
+const episodeReviewStatusLabels: Record<EpisodeReviewStatus, string> = {
+  ready: '结构通过', attention: '需要完善', blocked: '存在阻断',
+};
+
+const episodeReviewStatusClasses: Record<EpisodeReviewStatus, string> = {
+  ready: 'border-emerald-200 bg-emerald-50 text-emerald-800',
+  attention: 'border-amber-200 bg-amber-50 text-amber-800',
+  blocked: 'border-rose-200 bg-rose-50 text-rose-800',
 };
 
 const sampleScript = `客厅，夜晚。
@@ -314,6 +325,14 @@ export default function Home() {
         notes: activeEpisodeSummary?.notes ?? '',
       }
     : emptyEpisodeSummaryDraft;
+  const episodeReviews = useMemo(() => episodeOptions.map((currentEpisodeNumber) => buildEpisodeReview(
+    currentEpisodeNumber,
+    scenes,
+    episodeSummaries.find((summary) => summary.episodeNumber === currentEpisodeNumber) ?? null,
+  )), [episodeOptions, scenes, episodeSummaries]);
+  const activeEpisodeReview = activeSummaryEpisode
+    ? episodeReviews.find((review) => review.episodeNumber === activeSummaryEpisode) ?? null
+    : null;
   const activeSavedScene = useMemo(
     () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
     [scenes, script],
@@ -687,6 +706,8 @@ export default function Home() {
   function exportResult() {
     const payload = {
       sourceScript: script, analysis: result, storyboard, sceneHistory: scenes,
+      episodeSummaries,
+      episodeReviews,
       humanReview: { approved: allShotsReviewed, reviewedShotIds, reviewedAt: allShotsReviewed ? new Date().toISOString() : null },
       videoDeliveryPackage: canDeliver ? deliveryPackage : null,
       videoDeliveryValidation: deliveryValidation,
@@ -1163,6 +1184,52 @@ export default function Home() {
                     </div>
                   )}
 
+                  {activeEpisodeReview && (
+                    <div className="mb-4 rounded-xl border border-rose-200 bg-rose-50/45 p-4">
+                      <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className="text-sm font-semibold text-rose-950">第 {activeEpisodeReview.episodeNumber} 集结构审查</p>
+                            <Badge variant="outline" className={episodeReviewStatusClasses[activeEpisodeReview.status]}>{episodeReviewStatusLabels[activeEpisodeReview.status]}</Badge>
+                          </div>
+                          <p className="mt-1 text-xs leading-5 text-rose-900">按固定规则检查戏剧目标、冲突推进、场次执行条件和跨场连续性。</p>
+                        </div>
+                        <div className="min-w-40 rounded-lg border border-rose-100 bg-white/80 px-4 py-3 text-right">
+                          <p className="text-[11px] text-rose-700">结构完整度</p>
+                          <p className="text-2xl font-semibold tabular-nums text-rose-950">{activeEpisodeReview.score}<span className="text-xs font-normal">/100</span></p>
+                        </div>
+                      </div>
+                      <div className="mt-4 flex items-center gap-3"><Progress value={activeEpisodeReview.score} className="h-2 flex-1 bg-rose-100" /><span className="text-xs font-semibold tabular-nums text-rose-800">{activeEpisodeReview.score}%</span></div>
+                      <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                        {activeEpisodeReview.checks.map((check) => (
+                          <div key={check.id} className={`rounded-lg border p-3 ${check.passed ? 'border-emerald-200 bg-emerald-50/80' : 'border-rose-200 bg-white/85'}`}>
+                            <div className="flex items-center gap-2">
+                              {check.passed ? <Check className="size-3.5 text-emerald-700" /> : <AlertTriangle className="size-3.5 text-rose-700" />}
+                              <p className={`text-xs font-semibold ${check.passed ? 'text-emerald-900' : 'text-rose-900'}`}>{check.label}</p>
+                            </div>
+                            <p className="mt-1 text-[11px] leading-5 text-muted-foreground">{check.detail}</p>
+                          </div>
+                        ))}
+                      </div>
+                      {activeEpisodeReview.issues.length > 0 ? (
+                        <div className="mt-4 space-y-2">
+                          {activeEpisodeReview.issues.map((issue) => (
+                            <div key={issue.id} className="rounded-lg border border-rose-100 bg-white/85 p-3">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <Badge variant="outline" className={issue.severity === 'hard' ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-amber-200 bg-amber-50 text-amber-800'}>{issue.severity === 'hard' ? '必须修复' : '建议完善'}</Badge>
+                                <p className="text-xs font-semibold text-slate-950">{issue.title}</p>
+                              </div>
+                              <p className="mt-1 text-xs leading-5 text-slate-700">{issue.detail}</p>
+                              <p className="mt-1 text-xs leading-5 text-rose-800"><span className="font-semibold">处理建议：</span>{issue.suggestion}</p>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800"><Check className="size-4" />本集结构规则全部通过，可以进入最终人工审美确认。</div>
+                      )}
+                    </div>
+                  )}
+
                   {scenes.length > 0 && (
                     <div className="mb-4 rounded-xl border border-slate-200 bg-slate-50/70 p-4">
                       <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
@@ -1192,7 +1259,11 @@ export default function Home() {
                           <p className="mt-1 text-xs leading-5 text-indigo-900">按场次顺序汇总时长、镜头和视频制作状态，帮助检查整部短剧的推进节奏。</p>
                           <p className="mt-1 flex items-center gap-1 text-[11px] text-indigo-700"><GripVertical className="size-3" />拖拽场次卡片可放到另一场之前，也可用右下角箭头调整。</p>
                         </div>
-                        <NativeSelect value={String(selectedEpisode)} onChange={(event) => setSelectedEpisode(event.target.value === 'all' ? 'all' : Number(event.target.value))} aria-label="筛选集数" className="w-full lg:w-36">
+                        <NativeSelect value={String(selectedEpisode)} onChange={(event) => {
+                          const nextEpisode = event.target.value === 'all' ? 'all' : Number(event.target.value);
+                          setSelectedEpisode(nextEpisode);
+                          if (nextEpisode !== 'all') setSummaryEpisode(nextEpisode);
+                        }} aria-label="筛选集数" className="w-full lg:w-36">
                           <NativeSelectOption value="all">全部集数</NativeSelectOption>
                           {episodeOptions.map((episode) => <NativeSelectOption key={episode} value={String(episode)}>第 {episode} 集</NativeSelectOption>)}
                         </NativeSelect>
