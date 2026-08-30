@@ -51,6 +51,17 @@ export default function Home() {
   const [sceneTitle, setSceneTitle] = useState('');
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [previousSceneNumber, setPreviousSceneNumber] = useState<number | null>(null);
+  const [reviewedShotIds, setReviewedShotIds] = useState<string[]>([]);
+
+  async function loadScenes() {
+    try {
+      const response = await fetch('/api/scenes');
+      const payload = await response.json() as { scenes?: StoredScene[] };
+      if (response.ok && payload.scenes) setScenes(payload.scenes);
+    } catch {
+      // The current-scene workflow remains usable if persistent history is temporarily unavailable.
+    }
+  }
 
   useEffect(() => {
     const saved = window.localStorage.getItem('scene-flow-script');
@@ -67,17 +78,10 @@ export default function Home() {
   const busy = isRunning || isStoryboardRunning || isSceneSaving;
   const latestScene = scenes[0] ?? null;
   const hasHardStoryboardIssues = activeContinuityIssues.some((issue) => issue.severity === 'hard');
-  const canSaveScene = Boolean(storyboard) && hardIssues.length === 0 && !hasHardStoryboardIssues;
-
-  async function loadScenes() {
-    try {
-      const response = await fetch('/api/scenes');
-      const payload = await response.json() as { scenes?: StoredScene[] };
-      if (response.ok && payload.scenes) setScenes(payload.scenes);
-    } catch {
-      // The current-scene workflow remains usable if persistent history is temporarily unavailable.
-    }
-  }
+  const reviewedShotSet = useMemo(() => new Set(reviewedShotIds), [reviewedShotIds]);
+  const reviewedShotCount = storyboard?.shots.filter((shot) => reviewedShotSet.has(shot.id)).length ?? 0;
+  const allShotsReviewed = Boolean(storyboard?.shots.length) && reviewedShotCount === storyboard?.shots.length;
+  const canSaveScene = Boolean(storyboard) && allShotsReviewed && hardIssues.length === 0 && !hasHardStoryboardIssues;
 
   async function requestAI(body: Record<string, unknown>) {
     const response = await fetch('/api/analyze', {
@@ -106,12 +110,14 @@ export default function Home() {
       setLoopCount(0);
       setStoryboard(null);
       setStoryboardLoopCount(0);
+      setReviewedShotIds([]);
     } catch (error) {
       setResult(analyzeScript(script));
       setSource('local');
       setLoopCount(0);
       setStoryboard(null);
       setStoryboardLoopCount(0);
+      setReviewedShotIds([]);
       setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}，已切换到本地规则结果。`);
     } finally {
       setIsRunning(false);
@@ -131,12 +137,14 @@ export default function Home() {
       setLoopCount((current) => current + 1);
       setStoryboard(null);
       setStoryboardLoopCount(0);
+      setReviewedShotIds([]);
     } catch (error) {
       setResult((current) => repairAnalysis(current));
       setSource('local');
       setLoopCount((current) => current + 1);
       setStoryboard(null);
       setStoryboardLoopCount(0);
+      setReviewedShotIds([]);
       setNotice(`${error instanceof Error ? error.message : '智能修复暂时不可用'}，本轮已由本地规则完成。`);
     } finally {
       setIsRunning(false);
@@ -157,6 +165,7 @@ export default function Home() {
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
       setStoryboard(payload.result);
       setStoryboardLoopCount(0);
+      setReviewedShotIds([]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '分镜生成暂时不可用，请稍后重试。');
     } finally {
@@ -181,6 +190,7 @@ export default function Home() {
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
       setStoryboard(payload.result);
       setStoryboardLoopCount((current) => current + 1);
+      setReviewedShotIds([]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '分镜修复暂时不可用，请稍后重试。');
     } finally {
@@ -219,6 +229,7 @@ export default function Home() {
     setLoopCount(0);
     setStoryboard(null);
     setStoryboardLoopCount(0);
+    setReviewedShotIds([]);
     setSceneTitle('');
     setPreviousSceneNumber(latestScene?.sceneNumber ?? null);
     setNotice(latestScene ? `已载入第 ${latestScene.sceneNumber} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
@@ -226,7 +237,11 @@ export default function Home() {
   }
 
   function exportResult() {
-    const payload = { sourceScript: script, analysis: result, storyboard, sceneHistory: scenes, exportedAt: new Date().toISOString() };
+    const payload = {
+      sourceScript: script, analysis: result, storyboard, sceneHistory: scenes,
+      humanReview: { approved: allShotsReviewed, reviewedShotIds, reviewedAt: allShotsReviewed ? new Date().toISOString() : null },
+      exportedAt: new Date().toISOString(),
+    };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -247,6 +262,17 @@ export default function Home() {
     await navigator.clipboard.writeText(storyboard.modelPrompt);
     setStoryboardCopied(true);
     window.setTimeout(() => setStoryboardCopied(false), 1600);
+  }
+
+  function toggleShotReview(shotId: string) {
+    setReviewedShotIds((current) => current.includes(shotId)
+      ? current.filter((id) => id !== shotId)
+      : [...current, shotId]);
+  }
+
+  function approveAllShots() {
+    if (!storyboard) return;
+    setReviewedShotIds(storyboard.shots.map((shot) => shot.id));
   }
 
   return (
@@ -457,11 +483,12 @@ export default function Home() {
                     </div>
                   ) : (
                     <div>
-                      <div className="mb-4 grid gap-2 sm:grid-cols-4">
+                      <div className="mb-4 grid gap-2 sm:grid-cols-5">
                         <Metric label="镜头数量" value={String(storyboard.shots.length)} suffix="个" />
                         <Metric label="预计时长" value={String(storyboard.totalDurationSec)} suffix="秒" />
                         <Metric label="连续性" value={String(storyboard.continuityScore)} suffix="分" danger={activeContinuityIssues.some((issue) => issue.severity === 'hard')} />
                         <Metric label="待修问题" value={String(activeContinuityIssues.length)} suffix="项" danger={activeContinuityIssues.length > 0} />
+                        <Metric label="人工确认" value={String(reviewedShotCount)} suffix={`/${storyboard.shots.length}`} danger={!allShotsReviewed} />
                       </div>
 
                       {storyboard.issues.length > 0 && (
@@ -481,6 +508,14 @@ export default function Home() {
                         </div>
                       )}
 
+                      <div className={`mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border p-4 ${allShotsReviewed ? 'border-emerald-200 bg-emerald-50/60' : 'border-violet-200 bg-violet-50/60'}`}>
+                        <div>
+                          <p className={`text-sm font-semibold ${allShotsReviewed ? 'text-emerald-950' : 'text-violet-950'}`}>人工审阅闸门 · {reviewedShotCount}/{storyboard.shots.length} 个镜头已确认</p>
+                          <p className={`mt-1 text-xs leading-5 ${allShotsReviewed ? 'text-emerald-800' : 'text-violet-800'}`}>{allShotsReviewed ? '全部镜头已确认，可以保存本场状态或导出执行包。' : '请逐个检查动作、台词、状态和视频Prompt；确认后才能进入跨场景状态库。'}</p>
+                        </div>
+                        <Button variant={allShotsReviewed ? 'secondary' : 'outline'} size="sm" onClick={approveAllShots} disabled={allShotsReviewed || busy}>全部确认</Button>
+                      </div>
+
                       <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                         <p className="text-xs text-muted-foreground">开始状态必须承接上一镜头结束状态；有跳切时必须给出原因。</p>
                         <div className="flex gap-2">
@@ -494,10 +529,12 @@ export default function Home() {
                       </div>
 
                       <div className="max-h-[650px] space-y-3 overflow-y-auto pr-1">
-                        {storyboard.shots.map((shot) => (
-                          <article key={shot.id} className="rounded-xl border border-border bg-card p-4">
+                        {storyboard.shots.map((shot) => {
+                          const reviewed = reviewedShotSet.has(shot.id);
+                          return (
+                          <article key={shot.id} className={`rounded-xl border p-4 ${reviewed ? 'border-emerald-200 bg-emerald-50/20' : 'border-border bg-card'}`}>
                             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                              <div className="flex items-center gap-2"><Badge className="bg-primary/10 text-primary">{shot.id}</Badge><Badge variant="outline">{shot.beatId}</Badge><span className="text-sm font-semibold">{shot.focus}</span></div>
+                              <div className="flex items-center gap-2"><Badge className="bg-primary/10 text-primary">{shot.id}</Badge><Badge variant="outline">{shot.beatId}</Badge><span className="text-sm font-semibold">{shot.focus}</span>{reviewed && <Badge className="bg-emerald-600">已确认</Badge>}</div>
                               <span className="flex items-center gap-1 text-xs text-muted-foreground"><Clock className="size-3.5" />{shot.durationSec}秒 · {shot.shotSize} · {shot.cameraAngle} · {shot.cameraMovement}</span>
                             </div>
                             <p className="text-sm leading-6"><span className="font-semibold">动作：</span>{shot.action}</p>
@@ -507,8 +544,14 @@ export default function Home() {
                               <ShotStateView label="结束状态" state={shot.endState} />
                             </div>
                             <div className="mt-3 rounded-lg bg-muted/45 px-3 py-2.5 text-xs leading-5"><span className="font-semibold">视频Prompt：</span>{shot.videoPrompt}</div>
+                            <div className="mt-3 flex justify-end">
+                              <Button size="sm" variant={reviewed ? 'secondary' : 'outline'} onClick={() => toggleShotReview(shot.id)} aria-pressed={reviewed} disabled={busy}>
+                                {reviewed ? <Check data-icon="inline-start" /> : null}{reviewed ? '取消确认' : '确认此镜头'}
+                              </Button>
+                            </div>
                           </article>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                   )}
@@ -533,7 +576,8 @@ export default function Home() {
                       </div>
                     </div>
                     {!storyboard && <p className="mt-3 text-xs text-sky-800">需要先生成分镜，系统才能取得准确的场景结束状态。</p>}
-                    {storyboard && !canSaveScene && <p className="mt-3 text-xs text-amber-800">请先解决剧本或分镜中的硬性问题，再把本场写入状态库。</p>}
+                    {storyboard && !allShotsReviewed && <p className="mt-3 text-xs text-violet-800">请先完成全部镜头的人工确认，再把本场写入状态库。</p>}
+                    {storyboard && allShotsReviewed && !canSaveScene && <p className="mt-3 text-xs text-amber-800">请先解决剧本或分镜中的硬性问题，再把本场写入状态库。</p>}
                   </div>
 
                   {!latestScene ? (
