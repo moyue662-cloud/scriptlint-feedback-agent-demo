@@ -24,6 +24,11 @@ import {
   type DeliveryAspectRatio, type VideoDeliveryPackage,
 } from '@/lib/video-delivery';
 
+type DeliveryShotStatus = 'pending' | 'submitted' | 'accepted';
+const deliveryStatusLabels: Record<DeliveryShotStatus, string> = {
+  pending: '待提交', submitted: '已提交', accepted: '已验收',
+};
+
 const sampleScript = `客厅，夜晚。
 林晓发现桌上父亲的辞职通知书，很生气地质问父亲：“你什么时候辞职的？”
 父亲很尴尬，试图隐瞒：“这不重要。”
@@ -60,6 +65,7 @@ export default function Home() {
   const [reviewedShotIds, setReviewedShotIds] = useState<string[]>([]);
   const [deliveryAspectRatio, setDeliveryAspectRatio] = useState<DeliveryAspectRatio>('9:16');
   const [deliveryCopied, setDeliveryCopied] = useState(false);
+  const [deliveryShotStatuses, setDeliveryShotStatuses] = useState<Record<string, DeliveryShotStatus>>({});
 
   async function loadScenes() {
     try {
@@ -99,6 +105,12 @@ export default function Home() {
     : null, [storyboard, deliveryAspectRatio]);
   const deliveryValidation = useMemo(() => deliveryPackage ? validateVideoDeliveryPackage(deliveryPackage) : null, [deliveryPackage]);
   const canDeliver = allShotsReviewed && deliveryValidation?.valid === true;
+  const deliveryTracking = useMemo(() => {
+    const shots = deliveryPackage?.shots ?? [];
+    const submittedCount = shots.filter((shot) => deliveryShotStatuses[shot.id] === 'submitted' || deliveryShotStatuses[shot.id] === 'accepted').length;
+    const acceptedCount = shots.filter((shot) => deliveryShotStatuses[shot.id] === 'accepted').length;
+    return { total: shots.length, submittedCount, acceptedCount, complete: shots.length > 0 && acceptedCount === shots.length };
+  }, [deliveryPackage, deliveryShotStatuses]);
 
   async function requestAI(body: Record<string, unknown>) {
     const response = await fetch('/api/analyze', {
@@ -130,6 +142,7 @@ export default function Home() {
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
       setDeliveryCopied(false);
+      setDeliveryShotStatuses({});
     } catch (error) {
       setResult(analyzeScript(script));
       setSource('local');
@@ -138,6 +151,7 @@ export default function Home() {
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
       setDeliveryCopied(false);
+      setDeliveryShotStatuses({});
       setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}，已切换到本地规则结果。`);
     } finally {
       setIsRunning(false);
@@ -159,6 +173,7 @@ export default function Home() {
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
       setDeliveryCopied(false);
+      setDeliveryShotStatuses({});
     } catch (error) {
       setResult((current) => repairAnalysis(current));
       setSource('local');
@@ -167,6 +182,7 @@ export default function Home() {
       setStoryboardLoopCount(0);
       setReviewedShotIds([]);
       setDeliveryCopied(false);
+      setDeliveryShotStatuses({});
       setNotice(`${error instanceof Error ? error.message : '智能修复暂时不可用'}，本轮已由本地规则完成。`);
     } finally {
       setIsRunning(false);
@@ -255,6 +271,7 @@ export default function Home() {
     setStoryboardLoopCount(0);
     setReviewedShotIds([]);
     setDeliveryCopied(false);
+    setDeliveryShotStatuses({});
     setSceneTitle('');
     setPreviousSceneNumber(latestScene?.sceneNumber ?? null);
     setNotice(latestScene ? `已载入第 ${latestScene.sceneNumber} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
@@ -267,6 +284,7 @@ export default function Home() {
       humanReview: { approved: allShotsReviewed, reviewedShotIds, reviewedAt: allShotsReviewed ? new Date().toISOString() : null },
       videoDeliveryPackage: deliveryPackage,
       videoDeliveryValidation: deliveryValidation,
+      deliveryTracking: { ...deliveryTracking, statuses: deliveryShotStatuses },
       exportedAt: new Date().toISOString(),
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -276,6 +294,10 @@ export default function Home() {
     anchor.download = '剧本交互执行包.json';
     anchor.click();
     URL.revokeObjectURL(url);
+  }
+
+  function setDeliveryShotStatus(shotId: string, status: DeliveryShotStatus) {
+    setDeliveryShotStatuses((current) => ({ ...current, [shotId]: status }));
   }
 
   async function copyPrompt() {
@@ -701,6 +723,26 @@ export default function Home() {
                           <div className="mt-1 space-y-1">{deliveryValidation?.issues.slice(0, 5).map((issue) => <p key={`${issue.code}-${issue.shotId ?? 'global'}`}>· {issue.shotId ? `${issue.shotId}：` : ''}{issue.message}</p>)}</div>
                         </div>
                       )}
+                      <div className="mb-4 rounded-xl border border-border bg-card p-4">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div><p className="text-sm font-semibold">制作跟踪</p><p className="mt-1 text-xs text-muted-foreground">已提交 {deliveryTracking.submittedCount}/{deliveryTracking.total} · 已验收 {deliveryTracking.acceptedCount}/{deliveryTracking.total}</p></div>
+                          <Badge variant="secondary" className={deliveryTracking.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : ''}>{deliveryTracking.complete ? '本场已验收' : `已验收 ${deliveryTracking.acceptedCount}/${deliveryTracking.total}`}</Badge>
+                        </div>
+                        <Progress value={deliveryTracking.total ? (deliveryTracking.acceptedCount / deliveryTracking.total) * 100 : 0} className="mt-3 [&_[data-slot=progress-indicator]]:bg-emerald-600" />
+                        <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
+                          {deliveryPackage.shots.map((shot) => {
+                            const status = deliveryShotStatuses[shot.id] ?? 'pending';
+                            return (
+                              <div key={shot.id} className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+                                <div className="min-w-0"><p className="text-xs font-semibold">{shot.order}. {shot.id} · {shot.durationSec}秒</p><p className="mt-1 truncate text-xs text-muted-foreground">{shot.dialogue}</p></div>
+                                <div className="flex shrink-0 gap-1">
+                                  {(['pending', 'submitted', 'accepted'] as DeliveryShotStatus[]).map((option) => <Button key={option} size="sm" variant={status === option ? 'default' : 'outline'} onClick={() => setDeliveryShotStatus(shot.id, option)} aria-label={`${shot.id}标记为${deliveryStatusLabels[option]}`}>{deliveryStatusLabels[option]}</Button>)}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
                       <div className="mb-4 rounded-xl border border-border bg-card p-4">
                         <p className="mb-2 text-sm font-semibold">交付参数</p>
                         <div className="flex flex-wrap gap-2">
