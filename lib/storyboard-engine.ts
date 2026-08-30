@@ -73,8 +73,32 @@ export function finalizeStoryboard(
   raw: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>,
   analysis: AnalysisResult,
 ): StoryboardResult {
+  const shots: StoryboardShot[] = [];
+  raw.shots.forEach((shot, index) => {
+    const continuous = index > 0 && /连续承接|直接承接|无变化/.test(shot.continuityReason);
+    shots.push({
+      ...shot,
+      startState: continuous ? { ...shots[index - 1].endState } : shot.startState,
+    });
+  });
+
+  const issueStateKeys: Partial<Record<ContinuityIssueType, keyof ShotState>> = {
+    character_position: 'characterPositions',
+    gaze_direction: 'gazeDirection',
+    prop_state: 'propState',
+    space_state: 'spaceState',
+    time_state: 'timeState',
+  };
+  const reconciledModelIssues = raw.issues.filter((issue) => {
+    const key = issueStateKeys[issue.type];
+    if (!key) return true;
+    const from = shots.find((shot) => shot.id === issue.fromShotId);
+    const to = shots.find((shot) => shot.id === issue.toShotId);
+    return !from || !to || from.endState[key].trim() !== to.startState[key].trim();
+  });
+
   const ruleIssues: ContinuityIssue[] = [];
-  let issueIndex = raw.issues.length + 1;
+  let issueIndex = reconciledModelIssues.length + 1;
   const addIssue = (issue: Omit<ContinuityIssue, 'id' | 'resolved'>) => {
     ruleIssues.push({
       id: `C${String(issueIndex++).padStart(2, '0')}`,
@@ -84,7 +108,7 @@ export function finalizeStoryboard(
   };
 
   const seenIds = new Set<string>();
-  raw.shots.forEach((shot, index) => {
+  shots.forEach((shot, index) => {
     if (seenIds.has(shot.id)) {
       addIssue({
         severity: 'hard', type: 'shot_identity', fromShotId: shot.id, toShotId: shot.id,
@@ -112,7 +136,7 @@ export function finalizeStoryboard(
     }
 
     if (index === 0) return;
-    const previous = raw.shots[index - 1];
+    const previous = shots[index - 1];
     const explainedCut = shot.continuityReason.trim().length >= 4 &&
       !/连续承接|直接承接|无变化/.test(shot.continuityReason);
     stateChecks.forEach(({ key, type, label, severity }) => {
@@ -129,7 +153,7 @@ export function finalizeStoryboard(
   });
 
   analysis.beats.forEach((beat) => {
-    if (!raw.shots.some((shot) => shot.beatId === beat.id)) {
+    if (!shots.some((shot) => shot.beatId === beat.id)) {
       addIssue({
         severity: 'hard', type: 'beat_coverage', fromShotId: beat.id, toShotId: beat.id,
         detail: `交互节拍 ${beat.id} 没有对应镜头，剧情因果链在分镜阶段中断。`,
@@ -138,13 +162,14 @@ export function finalizeStoryboard(
     }
   });
 
-  const issues = [...raw.issues, ...ruleIssues];
+  const issues = [...reconciledModelIssues, ...ruleIssues];
   const hardCount = issues.filter((issue) => !issue.resolved && issue.severity === 'hard').length;
   const softCount = issues.filter((issue) => !issue.resolved && issue.severity === 'soft').length;
   return {
     ...raw,
+    shots,
     issues,
-    totalDurationSec: Math.round(raw.shots.reduce((sum, shot) => sum + shot.durationSec, 0) * 10) / 10,
+    totalDurationSec: Math.round(shots.reduce((sum, shot) => sum + shot.durationSec, 0) * 10) / 10,
     continuityScore: Math.max(0, Math.min(100, 100 - hardCount * 14 - softCount * 5)),
     generatedAt: new Date().toISOString(),
   };
