@@ -204,7 +204,8 @@ export async function POST(request: Request) {
       meta: {
         source: 'ai', provider: 'deepseek', model: MODEL,
         mode: isRepair ? 'repair' : 'analyze',
-        previousSceneNumber: previousScene?.sceneNumber ?? null,
+        previousSceneNumber: previousScene?.sceneOrder ?? null,
+        previousEpisodeNumber: previousScene?.episodeNumber ?? null,
       },
     });
   } catch (error) {

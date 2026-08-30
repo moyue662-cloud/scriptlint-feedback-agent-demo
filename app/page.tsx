@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowRight, Check, ChevronRight, Clipboard, Download,
+  AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Check, ChevronRight, Clipboard, Download,
   Camera, Clock, Database, FileText, Film, GitBranch, Loader2, Play,
   PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Users,
 } from 'lucide-react';
@@ -85,6 +85,7 @@ export default function Home() {
   const [storyboardLoopCount, setStoryboardLoopCount] = useState(0);
   const [scenes, setScenes] = useState<StoredScene[]>([]);
   const [sceneTitle, setSceneTitle] = useState('');
+  const [episodeNumber, setEpisodeNumber] = useState(1);
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
   const [project, setProject] = useState<SceneProject | null>(null);
@@ -143,8 +144,9 @@ export default function Home() {
       setDeliveryShotStatuses(detail.deliveryTracking.statuses);
       setDeliveryCopied(false);
       setSceneTitle(detail.title);
-      setPreviousSceneNumber(scenes.find((item) => item.sceneNumber === detail.sceneNumber - 1)?.sceneNumber ?? null);
-      setNotice(`已载入第 ${detail.sceneNumber} 场，可继续修改或查看制作进度。`);
+      setEpisodeNumber(detail.episodeNumber);
+      setPreviousSceneNumber(scenes.find((item) => item.sceneOrder === detail.sceneOrder - 1)?.sceneOrder ?? null);
+      setNotice(`已载入第 ${detail.episodeNumber} 集第 ${detail.sceneOrder} 场，可继续修改或查看制作进度。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '场次载入失败，请稍后重试。');
     } finally {
@@ -190,12 +192,17 @@ export default function Home() {
   const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isPipelineRunning || isProjectSaving;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
-    const ordered = [...scenes].sort((a, b) => a.sceneNumber - b.sceneNumber);
+    const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
     const totalShots = ordered.reduce((total, scene) => total + scene.summary.shotCount, 0);
     const totalDurationSec = ordered.reduce((total, scene) => total + scene.summary.durationSec, 0);
     const acceptedShots = ordered.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0);
+    const episodes = Array.from(new Set(ordered.map((scene) => scene.episodeNumber))).map((episodeNumber) => ({
+      episodeNumber,
+      scenes: ordered.filter((scene) => scene.episodeNumber === episodeNumber),
+    }));
     return {
       scenes: ordered,
+      episodes,
       totalShots,
       totalDurationSec,
       acceptedShots,
@@ -479,17 +486,18 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           projectId: project?.id || DEFAULT_PROJECT_ID,
+          episodeNumber,
           title: sceneTitle, script, analysis: result, storyboard,
           deliveryTracking: { statuses: deliveryShotStatuses },
         }),
       });
       const payload = await response.json() as {
-        saved?: { sceneNumber: number; updated: boolean };
+        saved?: { sceneNumber: number; episodeNumber: number; sceneOrder: number; updated: boolean };
         error?: string;
       };
       if (!response.ok || !payload.saved) throw new Error(payload.error || '场次状态保存失败');
       await loadScenes();
-      setNotice(`第 ${payload.saved.sceneNumber} 场状态${payload.saved.updated ? '已更新' : '已保存'}，编译下一场时会自动继承。`);
+      setNotice(`第 ${payload.saved.episodeNumber} 集第 ${payload.saved.sceneOrder} 场状态${payload.saved.updated ? '已更新' : '已保存'}，编译下一场时会自动继承。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '场次状态保存失败，请稍后重试。');
     } finally {
@@ -508,9 +516,31 @@ export default function Home() {
     setDeliveryCopied(false);
     setDeliveryShotStatuses({});
     setSceneTitle('');
+    setEpisodeNumber(latestScene?.episodeNumber ?? 1);
     setPreviousSceneNumber(latestScene?.sceneNumber ?? null);
-    setNotice(latestScene ? `已载入第 ${latestScene.sceneNumber} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
+    setNotice(latestScene ? `已载入第 ${latestScene.episodeNumber} 集第 ${latestScene.sceneOrder} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
     window.localStorage.setItem('scene-flow-script', '');
+  }
+
+  async function moveScene(sceneId: string, direction: 'move-up' | 'move-down') {
+    if (busy) return;
+    try {
+      const response = await fetch('/api/scenes', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sceneId, action: direction }),
+      });
+      const payload = await response.json() as { moved?: boolean; error?: string };
+      if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
+      if (payload.moved) {
+        await loadScenes();
+        setNotice('场次顺序已调整，时间线和下一场继承关系已更新。');
+      } else {
+        setNotice(direction === 'move-up' ? '已经是本项目最前一场。' : '已经是本项目最后一场。');
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '场次顺序调整失败，请稍后重试。');
+    }
   }
 
   function getPersistedDeliveryStatuses(nextStoryboard: StoryboardResult) {
@@ -924,7 +954,10 @@ export default function Home() {
                       <div className="min-w-0 flex-1">
                         <p className="text-sm font-semibold text-sky-950">跨场景状态数据库</p>
                         <p className="mt-1 text-xs leading-5 text-sky-900">分镜确认后保存本场。下一场AI编译会自动继承最新人物、道具、空间和时间状态。</p>
-                        <Input aria-label="场次标题" value={sceneTitle} onChange={(event) => setSceneTitle(event.target.value)} className="mt-3 max-w-md bg-white" placeholder={`场次标题，例如：${scenes.length + 1}. 客厅对峙`} />
+                        <div className="mt-3 grid max-w-md gap-2 sm:grid-cols-[110px_1fr]">
+                          <Input aria-label="集数" type="number" min={1} max={999} value={episodeNumber} onChange={(event) => setEpisodeNumber(Number(event.target.value))} className="bg-white" placeholder="集数" />
+                          <Input aria-label="场次标题" value={sceneTitle} onChange={(event) => setSceneTitle(event.target.value)} className="bg-white" placeholder={`场次标题，例如：${scenes.length + 1}. 客厅对峙`} />
+                        </div>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <Button onClick={saveSceneState} disabled={!canSaveScene || busy}>
@@ -956,21 +989,32 @@ export default function Home() {
                         <Progress value={sceneTimeline.productionProgress} className="h-2 flex-1 bg-indigo-100" />
                         <span className="min-w-12 text-right text-xs font-semibold tabular-nums text-indigo-900">{sceneTimeline.productionProgress}%</span>
                       </div>
-                      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                        {sceneTimeline.scenes.map((scene, index) => (
-                          <div key={scene.id} className="relative rounded-lg border border-indigo-100 bg-white/80 p-3">
-                            {index < sceneTimeline.scenes.length - 1 && <span className="absolute -right-3 top-1/2 hidden h-px w-3 bg-indigo-200 xl:block" aria-hidden="true" />}
-                            <div className="flex items-start justify-between gap-2">
-                              <div className="flex items-center gap-2"><span className="grid size-6 place-items-center rounded-full bg-indigo-100 text-xs font-semibold text-indigo-800">{scene.sceneNumber}</span><p className="line-clamp-1 text-sm font-semibold text-indigo-950">{scene.title}</p></div>
-                              <Badge variant="outline" className={sceneStatusClasses[scene.summary.status]}>{sceneStatusLabels[scene.summary.status]}</Badge>
+                      <div className="mt-4 space-y-4">
+                        {sceneTimeline.episodes.map((episode) => (
+                          <section key={episode.episodeNumber} className="rounded-lg border border-indigo-100 bg-white/55 p-3">
+                            <div className="mb-3 flex items-center justify-between gap-2"><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场</p><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
+                            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                              {episode.scenes.map((scene, index) => (
+                                <div key={scene.id} className="relative rounded-lg border border-indigo-100 bg-white/85 p-3">
+                                  {index < episode.scenes.length - 1 && <span className="absolute -right-3 top-1/2 hidden h-px w-3 bg-indigo-200 xl:block" aria-hidden="true" />}
+                                  <div className="flex items-start justify-between gap-2">
+                                    <div className="flex min-w-0 items-center gap-2"><span className="grid size-6 shrink-0 place-items-center rounded-full bg-indigo-100 text-xs font-semibold text-indigo-800">{scene.sceneOrder}</span><p className="line-clamp-1 text-sm font-semibold text-indigo-950">{scene.title}</p></div>
+                                    <Badge variant="outline" className={sceneStatusClasses[scene.summary.status]}>{sceneStatusLabels[scene.summary.status]}</Badge>
+                                  </div>
+                                  <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
+                                    <span><Clock className="mr-1 inline size-3" />{scene.summary.durationSec}秒</span>
+                                    <span><Film className="mr-1 inline size-3" />{scene.summary.shotCount}镜头</span>
+                                    <span className={scene.summary.continuityIssueCount > 0 ? 'text-amber-700' : 'text-emerald-700'}>{scene.summary.continuityIssueCount > 0 ? `待修 ${scene.summary.continuityIssueCount}` : '连续性通过'}</span>
+                                  </div>
+                                  <div className="mt-2 flex items-center gap-2"><Progress value={scene.summary.productionProgress} className="h-1.5 flex-1" /><span className="text-[11px] tabular-nums text-muted-foreground">{scene.summary.productionProgress}%</span></div>
+                                  <div className="mt-3 flex justify-end gap-1">
+                                    <Button size="sm" variant="ghost" aria-label={`第 ${scene.sceneOrder} 场上移`} onClick={() => void moveScene(scene.id, 'move-up')} disabled={busy || index === 0}><ArrowUp className="size-3.5" /></Button>
+                                    <Button size="sm" variant="ghost" aria-label={`第 ${scene.sceneOrder} 场下移`} onClick={() => void moveScene(scene.id, 'move-down')} disabled={busy || index === episode.scenes.length - 1}><ArrowDown className="size-3.5" /></Button>
+                                  </div>
+                                </div>
+                              ))}
                             </div>
-                            <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
-                              <span><Clock className="mr-1 inline size-3" />{scene.summary.durationSec}秒</span>
-                              <span><Film className="mr-1 inline size-3" />{scene.summary.shotCount}镜头</span>
-                              <span className={scene.summary.continuityIssueCount > 0 ? 'text-amber-700' : 'text-emerald-700'}>{scene.summary.continuityIssueCount > 0 ? `待修 ${scene.summary.continuityIssueCount}` : '连续性通过'}</span>
-                            </div>
-                            <div className="mt-2 flex items-center gap-2"><Progress value={scene.summary.productionProgress} className="h-1.5 flex-1" /><span className="text-[11px] tabular-nums text-muted-foreground">{scene.summary.productionProgress}%</span></div>
-                          </div>
+                          </section>
                         ))}
                       </div>
                     </div>
@@ -989,7 +1033,7 @@ export default function Home() {
                       {scenes.map((scene, index) => (
                         <article key={scene.id} className={`rounded-xl border p-4 ${index === 0 ? 'border-sky-200 bg-sky-50/35' : 'border-border bg-card'}`}>
                           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2"><Badge className="bg-sky-700">第 {scene.sceneNumber} 场</Badge><span className="text-sm font-semibold">{scene.title}</span>{index === 0 && <Badge variant="outline">当前继承源</Badge>}</div>
+                            <div className="flex items-center gap-2"><Badge className="bg-sky-700">第 {scene.episodeNumber} 集 · 第 {scene.sceneOrder} 场</Badge><span className="text-sm font-semibold">{scene.title}</span>{index === 0 && <Badge variant="outline">当前继承源</Badge>}</div>
                             <div className="flex items-center gap-2"><span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span><Button size="sm" variant="outline" onClick={() => void loadSavedScene(scene)} disabled={busy}>{isSceneLoading ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <FileText data-icon="inline-start" />}载入本场</Button></div>
                           </div>
                           <div className="grid gap-2 sm:grid-cols-3">
@@ -1054,7 +1098,7 @@ export default function Home() {
                       )}
                       <div className="mb-4 rounded-xl border border-border bg-card p-4">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div><p className="text-sm font-semibold">制作跟踪</p><p className="mt-1 text-xs text-muted-foreground">已提交 {deliveryTracking.submittedCount}/{deliveryTracking.total} · 已验收 {deliveryTracking.acceptedCount}/{deliveryTracking.total}</p><p className="mt-1 text-[11px] text-muted-foreground">{activeSavedScene ? `已关联第 ${activeSavedScene.sceneNumber} 场，进度自动保存` : '先保存场次状态，进度才能跨刷新保留'}</p></div>
+                          <div><p className="text-sm font-semibold">制作跟踪</p><p className="mt-1 text-xs text-muted-foreground">已提交 {deliveryTracking.submittedCount}/{deliveryTracking.total} · 已验收 {deliveryTracking.acceptedCount}/{deliveryTracking.total}</p><p className="mt-1 text-[11px] text-muted-foreground">{activeSavedScene ? `已关联第 ${activeSavedScene.episodeNumber} 集第 ${activeSavedScene.sceneOrder} 场，进度自动保存` : '先保存场次状态，进度才能跨刷新保留'}</p></div>
                           <Badge variant="secondary" className={deliveryTracking.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : ''}>{deliveryTracking.complete ? '本场已验收' : `已验收 ${deliveryTracking.acceptedCount}/${deliveryTracking.total}`}</Badge>
                         </div>
                         <Progress value={deliveryTracking.total ? (deliveryTracking.acceptedCount / deliveryTracking.total) * 100 : 0} className="mt-3 [&_[data-slot=progress-indicator]]:bg-emerald-600" />

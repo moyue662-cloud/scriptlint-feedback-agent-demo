@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 
-import { createProjectsTableSql, createSceneStatesTableSql } from '@/db/schema';
+import { createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql } from '@/db/schema';
 import { buildSceneProductionSummary, DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type {
   DeliveryShotStatus, DeliveryTrackingState, SceneProject,
@@ -13,6 +13,8 @@ interface SceneRow {
   id: string;
   project_id: string;
   scene_number: number;
+  episode_number?: number | null;
+  scene_order?: number | null;
   title: string;
   script: string;
   analysis_json?: string;
@@ -40,6 +42,7 @@ async function ensureSchema() {
     const db = database();
     await db.prepare(createProjectsTableSql).run();
     await db.prepare(createSceneStatesTableSql).run();
+    await db.prepare(createSceneOrderIndexSql).run();
     const columns = await db.prepare('PRAGMA table_info(scene_states)').all<{ name: string }>();
     if (!columns.results.some((column) => column.name === 'delivery_tracking_json')) {
       try {
@@ -55,6 +58,22 @@ async function ensureSchema() {
       } catch (error) {
         if (!String(error).toLowerCase().includes('duplicate column')) throw error;
       }
+    }
+    if (!columns.results.some((column) => column.name === 'episode_number')) {
+      try {
+        await db.prepare('ALTER TABLE scene_states ADD COLUMN episode_number INTEGER NOT NULL DEFAULT 1').run();
+      } catch (error) {
+        if (!String(error).toLowerCase().includes('duplicate column')) throw error;
+      }
+    }
+    const addedSceneOrder = !columns.results.some((column) => column.name === 'scene_order');
+    if (addedSceneOrder) {
+      try {
+        await db.prepare('ALTER TABLE scene_states ADD COLUMN scene_order INTEGER NOT NULL DEFAULT 0').run();
+      } catch (error) {
+        if (!String(error).toLowerCase().includes('duplicate column')) throw error;
+      }
+      await db.prepare('UPDATE scene_states SET scene_order = scene_number WHERE scene_order = 0').run();
     }
     await db.prepare(
       'INSERT OR IGNORE INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)',
@@ -96,6 +115,8 @@ function toStoredScene(row: SceneRow): StoredScene {
     id: row.id,
     projectId: row.project_id || DEFAULT_PROJECT_ID,
     sceneNumber: row.scene_number,
+    episodeNumber: Math.max(1, Number(row.episode_number) || 1),
+    sceneOrder: Math.max(1, Number(row.scene_order) || row.scene_number),
     title: row.title,
     script: row.script,
     snapshot: JSON.parse(row.snapshot_json) as SceneSnapshot,
@@ -136,8 +157,8 @@ export async function updateProjectName(name: string, id = DEFAULT_PROJECT_ID) {
 export async function listScenes(projectId = DEFAULT_PROJECT_ID, limit = 30) {
   await ensureSchema();
   const result = await database().prepare(
-    `SELECT id, project_id, scene_number, title, script, storyboard_json, snapshot_json, delivery_tracking_json, created_at
-     FROM scene_states WHERE project_id = ? ORDER BY scene_number DESC LIMIT ?`,
+    `SELECT id, project_id, scene_number, episode_number, scene_order, title, script, storyboard_json, snapshot_json, delivery_tracking_json, created_at
+     FROM scene_states WHERE project_id = ? ORDER BY scene_order DESC, scene_number DESC LIMIT ?`,
   ).bind(projectId, Math.max(1, Math.min(100, limit))).all<SceneRow>();
   return result.results.map(toStoredScene);
 }
@@ -145,8 +166,8 @@ export async function listScenes(projectId = DEFAULT_PROJECT_ID, limit = 30) {
 export async function getLatestScene(projectId = DEFAULT_PROJECT_ID) {
   await ensureSchema();
   const row = await database().prepare(
-    `SELECT id, project_id, scene_number, title, script, storyboard_json, snapshot_json, delivery_tracking_json, created_at
-     FROM scene_states WHERE project_id = ? ORDER BY scene_number DESC LIMIT 1`,
+    `SELECT id, project_id, scene_number, episode_number, scene_order, title, script, storyboard_json, snapshot_json, delivery_tracking_json, created_at
+     FROM scene_states WHERE project_id = ? ORDER BY scene_order DESC, scene_number DESC LIMIT 1`,
   ).bind(projectId).first<SceneRow>();
   return row ? toStoredScene(row) : null;
 }
@@ -154,7 +175,7 @@ export async function getLatestScene(projectId = DEFAULT_PROJECT_ID) {
 export async function getSceneById(id: string) {
   await ensureSchema();
   const row = await database().prepare(
-    `SELECT id, project_id, scene_number, title, script, analysis_json, storyboard_json,
+    `SELECT id, project_id, scene_number, episode_number, scene_order, title, script, analysis_json, storyboard_json,
        snapshot_json, delivery_tracking_json, created_at
      FROM scene_states WHERE id = ?`,
   ).bind(id).first<SceneRow>();
@@ -163,6 +184,7 @@ export async function getSceneById(id: string) {
 
 export async function saveScene(input: {
   projectId?: string;
+  episodeNumber?: number;
   title: string;
   sourceHash: string;
   script: string;
@@ -173,11 +195,12 @@ export async function saveScene(input: {
 }) {
   await ensureSchema();
   const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
+  const episodeNumber = Math.max(1, Math.min(999, Math.round(Number(input.episodeNumber) || 1)));
   const project = await getProject(projectId);
   if (!project) throw new Error('项目不存在');
   const existing = await database().prepare(
-    'SELECT id, scene_number FROM scene_states WHERE source_hash = ?',
-  ).bind(input.sourceHash).first<{ id: string; scene_number: number }>();
+    'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE source_hash = ?',
+  ).bind(input.sourceHash).first<{ id: string; scene_number: number; episode_number: number; scene_order: number }>();
   const createdAt = new Date().toISOString();
   const shotIds = new Set(input.storyboard.shots.map((shot) => shot.id));
   const deliveryTracking = normalizeDeliveryTracking(input.deliveryTracking, shotIds);
@@ -185,30 +208,64 @@ export async function saveScene(input: {
 
   if (existing) {
     await database().prepare(
-      `UPDATE scene_states SET title = ?, script = ?, analysis_json = ?, storyboard_json = ?,
+      `UPDATE scene_states SET episode_number = ?, title = ?, script = ?, analysis_json = ?, storyboard_json = ?,
        snapshot_json = ?, delivery_tracking_json = ?, created_at = ? WHERE id = ?`,
     ).bind(
-      input.title, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
+      episodeNumber, input.title, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
       JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt, existing.id,
     ).run();
-    return { id: existing.id, sceneNumber: existing.scene_number, updated: true };
+    return {
+      id: existing.id,
+      sceneNumber: existing.scene_number,
+      episodeNumber,
+      sceneOrder: existing.scene_order,
+      updated: true,
+    };
   }
 
   const latest = await database().prepare(
-    'SELECT COALESCE(MAX(scene_number), 0) AS latest FROM scene_states WHERE project_id = ?',
-  ).bind(projectId).first<{ latest: number }>();
+    'SELECT COALESCE(MAX(scene_number), 0) AS latest FROM scene_states',
+  ).first<{ latest: number }>();
   const sceneNumber = Number(latest?.latest ?? 0) + 1;
+  const latestOrder = await database().prepare(
+    'SELECT COALESCE(MAX(scene_order), 0) AS latest FROM scene_states WHERE project_id = ?',
+  ).bind(projectId).first<{ latest: number }>();
+  const sceneOrder = Number(latestOrder?.latest ?? 0) + 1;
   const id = crypto.randomUUID();
   await database().prepare(
     `INSERT INTO scene_states
-     (id, project_id, scene_number, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, project_id, scene_number, episode_number, scene_order, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
-    id, projectId, sceneNumber, input.title, input.sourceHash, input.script,
+    id, projectId, sceneNumber, episodeNumber, sceneOrder, input.title, input.sourceHash, input.script,
     JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
     JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt,
   ).run();
-  return { id, sceneNumber, updated: false };
+  return { id, sceneNumber, episodeNumber, sceneOrder, updated: false };
+}
+
+export async function moveScene(input: { sceneId: string; direction: 'up' | 'down' }) {
+  await ensureSchema();
+  const db = database();
+  const current = await db.prepare(
+    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ?',
+  ).bind(input.sceneId).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
+  if (!current) return null;
+  const comparison = input.direction === 'up' ? '<' : '>';
+  const order = input.direction === 'up' ? 'DESC' : 'ASC';
+  const adjacent = await db.prepare(
+    `SELECT id, scene_order FROM scene_states
+     WHERE project_id = ? AND episode_number = ? AND scene_order ${comparison} ?
+     ORDER BY scene_order ${order}, scene_number ${order} LIMIT 1`,
+  ).bind(current.project_id, current.episode_number, current.scene_order).first<{ id: string; scene_order: number }>();
+  if (!adjacent) return { moved: false };
+  const temporaryOrder = Math.max(current.scene_order, adjacent.scene_order) + 1000000;
+  await db.batch([
+    db.prepare('UPDATE scene_states SET scene_order = ? WHERE id = ?').bind(temporaryOrder, current.id),
+    db.prepare('UPDATE scene_states SET scene_order = ? WHERE id = ?').bind(current.scene_order, adjacent.id),
+    db.prepare('UPDATE scene_states SET scene_order = ? WHERE id = ?').bind(adjacent.scene_order, current.id),
+  ]);
+  return { moved: true };
 }
 
 export async function updateSceneDeliveryTracking(input: {

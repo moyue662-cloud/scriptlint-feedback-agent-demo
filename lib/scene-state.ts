@@ -50,6 +50,8 @@ export interface StoredScene {
   id: string;
   projectId: string;
   sceneNumber: number;
+  episodeNumber: number;
+  sceneOrder: number;
   title: string;
   script: string;
   snapshot: SceneSnapshot;
@@ -129,7 +131,8 @@ export function buildSceneSnapshot(analysis: AnalysisResult, storyboard: Storybo
 
 export function sceneContinuityContext(scene: StoredScene) {
   return {
-    previousSceneNumber: scene.sceneNumber,
+    previousEpisodeNumber: scene.episodeNumber,
+    previousSceneNumber: scene.sceneOrder,
     previousSceneTitle: scene.title,
     rule: '以下是上一场结束时的确定状态。新场景必须默认继承；只有剧本明确描述时间流逝、移动、交接或状态变化时才能改变。',
     snapshot: scene.snapshot,

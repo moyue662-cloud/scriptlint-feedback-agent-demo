@@ -1,5 +1,5 @@
 import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '@/lib/scene-state';
-import { getLatestScene, getSceneById, listScenes, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
+import { getLatestScene, getSceneById, listScenes, moveScene, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import type { StoryboardResult } from '@/lib/storyboard-engine';
 
@@ -35,6 +35,7 @@ export async function POST(request: Request) {
     const body = await request.json() as {
       title?: string;
       projectId?: string;
+      episodeNumber?: number;
       script?: string;
       analysis?: AnalysisResult;
       storyboard?: StoryboardResult;
@@ -49,6 +50,7 @@ export async function POST(request: Request) {
     const saved = await saveScene({
       title: body.title?.trim().slice(0, 80) || '未命名场次',
       projectId,
+      episodeNumber: body.episodeNumber,
       sourceHash: await hashSource(script),
       script,
       analysis: body.analysis,
@@ -66,9 +68,17 @@ export async function POST(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const body = await request.json() as { sceneId?: string; deliveryTracking?: unknown };
+    const body = await request.json() as { sceneId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' };
     const sceneId = body.sceneId?.trim() ?? '';
-    if (!sceneId || body.deliveryTracking === undefined) {
+    if (!sceneId) {
+      return Response.json({ error: '缺少场次或制作进度信息。' }, { status: 400 });
+    }
+    if (body.action === 'move-up' || body.action === 'move-down') {
+      const moved = await moveScene({ sceneId, direction: body.action === 'move-up' ? 'up' : 'down' });
+      if (!moved) return Response.json({ error: '找不到要调整的场次。' }, { status: 404 });
+      return Response.json({ moved: moved.moved });
+    }
+    if (body.deliveryTracking === undefined) {
       return Response.json({ error: '缺少场次或制作进度信息。' }, { status: 400 });
     }
     const tracking = await updateSceneDeliveryTracking({ sceneId, tracking: body.deliveryTracking });
