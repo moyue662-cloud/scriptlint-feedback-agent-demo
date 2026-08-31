@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers';
 
-import { createEpisodeAiReviewsTableSql, createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql, createSceneVersionsIndexSql, createSceneVersionsTableSql } from '@/db/schema';
+import { createEpisodeAiReviewsTableSql, createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql, createSceneVersionsIndexSql, createSceneVersionsTableSql, createSceneVisualReviewsIndexSql, createSceneVisualReviewsTableSql } from '@/db/schema';
 import type { EpisodeAIReview } from '@/lib/episode-ai-review';
 import { buildSceneProductionSummary, DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type {
@@ -67,6 +67,16 @@ interface SceneVersionRow {
   created_at: string;
 }
 
+interface SceneVisualReviewRow {
+  id: string;
+  project_id: string;
+  scene_id?: string | null;
+  source_name: string;
+  source_hash: string;
+  review_json: string;
+  created_at: string;
+}
+
 function database() {
   return (env as unknown as { DB: D1Database }).DB;
 }
@@ -90,6 +100,8 @@ async function ensureSchema() {
     await db.prepare(createSceneStatesTableSql).run();
     await db.prepare(createSceneVersionsTableSql).run();
     await db.prepare(createSceneVersionsIndexSql).run();
+    await db.prepare(createSceneVisualReviewsTableSql).run();
+    await db.prepare(createSceneVisualReviewsIndexSql).run();
     await db.prepare(
       `INSERT INTO scene_versions
        (id, scene_id, project_id, version_number, episode_number, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
@@ -565,6 +577,8 @@ export async function deleteScene(input: { sceneId: string; projectId?: string }
     .bind(current.id, current.project_id).run();
   await db.prepare('DELETE FROM scene_versions WHERE scene_id = ? AND project_id = ?')
     .bind(current.id, current.project_id).run();
+  await db.prepare('DELETE FROM scene_visual_reviews WHERE scene_id = ? AND project_id = ?')
+    .bind(current.id, current.project_id).run();
   const remaining = await db.prepare(
     'SELECT id FROM scene_states WHERE project_id = ? ORDER BY scene_order ASC, scene_number ASC',
   ).bind(current.project_id).all<{ id: string }>();
@@ -663,4 +677,51 @@ export async function updateSceneDeliveryTracking(input: {
   ).bind(JSON.stringify(tracking), input.sceneId).run();
   await invalidateProjectApproval(row.project_id || DEFAULT_PROJECT_ID);
   return tracking;
+}
+
+export async function listSceneVisualReviews(sceneId: string, projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const result = await database().prepare(
+    `SELECT id, project_id, scene_id, source_name, source_hash, review_json, created_at
+     FROM scene_visual_reviews WHERE scene_id = ? AND project_id = ? ORDER BY created_at DESC LIMIT 20`,
+  ).bind(sceneId, projectId).all<SceneVisualReviewRow>();
+  return result.results.map((row) => ({
+    id: row.id,
+    projectId: row.project_id || DEFAULT_PROJECT_ID,
+    sceneId: row.scene_id ?? null,
+    sourceName: row.source_name,
+    sourceHash: row.source_hash,
+    review: JSON.parse(row.review_json) as Record<string, unknown>,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function saveSceneVisualReview(input: {
+  projectId?: string;
+  sceneId?: string | null;
+  sourceName: string;
+  sourceHash: string;
+  review: Record<string, unknown>;
+}) {
+  await ensureSchema();
+  const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
+  const id = crypto.randomUUID();
+  const createdAt = new Date().toISOString();
+  await database().prepare(
+    `INSERT INTO scene_visual_reviews
+     (id, project_id, scene_id, source_name, source_hash, review_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    id, projectId, input.sceneId?.trim() || null, input.sourceName.slice(0, 240), input.sourceHash.slice(0, 128),
+    JSON.stringify(input.review), createdAt,
+  ).run();
+  return {
+    id,
+    projectId,
+    sceneId: input.sceneId?.trim() || null,
+    sourceName: input.sourceName.slice(0, 240),
+    sourceHash: input.sourceHash.slice(0, 128),
+    review: input.review,
+    createdAt,
+  };
 }

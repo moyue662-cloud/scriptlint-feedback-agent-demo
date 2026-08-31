@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import {
   AlertTriangle, ArrowDown, ArrowRight, ArrowUp, BrainCircuit, Check, ChevronRight, Clipboard, Download,
-  Camera, Clock, Database, FileText, Film, GitBranch, GripVertical, Loader2, Play,
-  PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Users,
+  Camera, Clock, Database, FileText, Film, GitBranch, GripVertical, ImagePlus, Loader2, Play,
+  PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Upload, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -21,6 +21,7 @@ import {
 import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
 import { passesEpisodeAIReviewGate, type EpisodeAIReview } from '@/lib/episode-ai-review';
 import { splitScriptIntoScenes, type ImportedSceneDraft } from '@/lib/batch-import';
+import { EVAL_CASES, evaluateCase, summarizeEvaluation, type EvaluationSummary } from '@/lib/eval-suite';
 import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState } from '@/lib/scene-state';
 import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, SceneVersionSummary, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import {
@@ -30,6 +31,7 @@ import {
   buildVideoDeliveryPackage, validateVideoDeliveryPackage, videoDeliveryToMarkdown,
   type DeliveryAspectRatio, type VideoDeliveryPackage,
 } from '@/lib/video-delivery';
+import { visualIssueTypeLabels, type VisualReview } from '@/lib/visual-review';
 
 const deliveryStatusLabels: Record<DeliveryShotStatus, string> = {
   pending: '待提交', submitted: '已提交', accepted: '已验收',
@@ -68,6 +70,46 @@ const sampleScript = `客厅，夜晚。
 
 const AI_REQUEST_TIMEOUT_MS = 34000;
 const PIPELINE_LOOP_LIMIT = 3;
+
+type VisualUpload = { name: string; mimeType: string; dataUrl: string };
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('无法读取文件'));
+    reader.onerror = () => reject(new Error('无法读取文件'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function extractVideoFrame(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    video.muted = true;
+    video.playsInline = true;
+    video.onloadedmetadata = () => {
+      video.currentTime = Math.min(Math.max(video.duration / 2, 0), 3);
+    };
+    video.onseeked = () => {
+      const maxWidth = 1280;
+      const scale = Math.min(1, maxWidth / Math.max(video.videoWidth, 1));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      URL.revokeObjectURL(url);
+      resolve(dataUrl);
+    };
+    video.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('无法从视频抽取画面'));
+    };
+    video.src = url;
+  });
+}
 
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
 type EpisodeSummaryDraft = Pick<EpisodeSummary, 'title' | 'objective' | 'conflict' | 'notes'>;
@@ -142,6 +184,13 @@ export default function Home() {
   const [versionHistorySceneId, setVersionHistorySceneId] = useState<string | null>(null);
   const [isVersionHistoryLoading, setIsVersionHistoryLoading] = useState(false);
   const [isVersionRestoring, setIsVersionRestoring] = useState(false);
+  const [visualFiles, setVisualFiles] = useState<VisualUpload[]>([]);
+  const [visualReview, setVisualReview] = useState<VisualReview | null>(null);
+  const [visualReviewHistory, setVisualReviewHistory] = useState<Array<{ id: string; sourceName: string; createdAt: string; review: VisualReview }>>([]);
+  const [isVisualReviewing, setIsVisualReviewing] = useState(false);
+  const [qualityEvaluation, setQualityEvaluation] = useState<{ baseline: EvaluationSummary; deepseek: EvaluationSummary | null; error?: string } | null>(null);
+  const [isQualityEvaluating, setIsQualityEvaluating] = useState(false);
+  const visualFileInputRef = useRef<HTMLInputElement | null>(null);
   const deliverySaveQueue = useRef<Promise<void>>(Promise.resolve());
 
   async function loadScenes() {
@@ -191,6 +240,16 @@ export default function Home() {
     }
   }
 
+  async function loadVisualReviewHistory(sceneId: string) {
+    try {
+      const response = await fetch(`/api/visual-review?sceneId=${encodeURIComponent(sceneId)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
+      const payload = await response.json() as { reviews?: Array<{ id: string; sourceName: string; createdAt: string; review: VisualReview }> };
+      if (response.ok && payload.reviews) setVisualReviewHistory(payload.reviews);
+    } catch {
+      // Visual history is supplementary; a new review can still be run if it is unavailable.
+    }
+  }
+
   function applySceneDetail(detail: StoredSceneDetail) {
     setScript(detail.script);
     window.localStorage.setItem('scene-flow-script', detail.script);
@@ -205,6 +264,9 @@ export default function Home() {
     setSceneTitle(detail.title);
     setEpisodeNumber(detail.episodeNumber);
     setLoadedSceneId(detail.id);
+    setVisualReview(null);
+    setVisualFiles([]);
+    void loadVisualReviewHistory(detail.id);
     const previous = [...scenes]
       .filter((item) => item.episodeNumber === detail.episodeNumber && item.sceneOrder < detail.sceneOrder)
       .sort((a, b) => b.sceneOrder - a.sceneOrder)[0];
@@ -251,6 +313,9 @@ export default function Home() {
     setReviewedShotIds([]);
     setDeliveryShotStatuses({});
     setLoadedSceneId(null);
+    setVisualReview(null);
+    setVisualFiles([]);
+    setVisualReviewHistory([]);
     setNotice(`已载入“${draft.title}”，现在可以运行AI编译或全流程。`);
   }
 
@@ -447,7 +512,7 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -1055,6 +1120,99 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
+  async function selectVisualFiles(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? []).slice(0, 6);
+    if (files.length === 0) return;
+    setNotice('正在读取图片并从视频中抽取代表帧…');
+    try {
+      const uploads: VisualUpload[] = [];
+      for (const file of files) {
+        const dataUrl = file.type.startsWith('video/')
+          ? await extractVideoFrame(file)
+          : await readFileAsDataUrl(file);
+        uploads.push({ name: file.name, mimeType: 'image/jpeg', dataUrl });
+      }
+      setVisualFiles(uploads);
+      setVisualReview(null);
+      setNotice(`已准备 ${uploads.length} 个画面帧；原始媒体不会上传或保存。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '读取媒体失败，请换一个文件重试。');
+    } finally {
+      event.target.value = '';
+    }
+  }
+
+  async function runVisualReview() {
+    if (!storyboard || visualFiles.length === 0 || isVisualReviewing) return;
+    setIsVisualReviewing(true);
+    setNotice('正在对照镜头状态检查成品画面…');
+    try {
+      const response = await fetch('/api/visual-review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectId: project?.id || DEFAULT_PROJECT_ID,
+          ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
+          images: visualFiles,
+          expected: {
+            title: sceneTitle || '当前场次',
+            snapshot: storyboard.shots[0]?.startState ?? {},
+            shots: storyboard.shots.map((shot) => ({ id: shot.id, focus: shot.focus, action: shot.action, dialogue: shot.dialogue, startState: shot.startState, endState: shot.endState })),
+          },
+        }),
+        signal: AbortSignal.timeout(56000),
+      });
+      const payload = await response.json() as { review?: VisualReview; error?: string };
+      if (!response.ok || !payload.review) throw new Error(payload.error || '视觉检查失败');
+      setVisualReview(payload.review);
+      if (loadedSceneId) void loadVisualReviewHistory(loadedSceneId);
+      setNotice(`视觉检查完成：发现 ${payload.review.issues.length} 项需复核问题。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '视觉检查失败，请稍后重试。');
+    } finally {
+      setIsVisualReviewing(false);
+    }
+  }
+
+  async function runQualityEvaluation() {
+    if (isQualityEvaluating) return;
+    setIsQualityEvaluating(true);
+    setNotice('正在运行回归评测；规则基线会立即返回，DeepSeek 逐个复测可能需要一点时间…');
+    try {
+      const baselineResponse = await fetch('/api/evals');
+      const baselinePayload = await baselineResponse.json() as { baseline?: EvaluationSummary };
+      if (!baselineResponse.ok || !baselinePayload.baseline) throw new Error('评测基线暂时不可用');
+      const modelResults = [];
+      let modelError = '';
+      for (const testCase of EVAL_CASES) {
+        try {
+          const response = await fetch('/api/analyze', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ script: testCase.script, mode: 'analyze', projectId: project?.id || DEFAULT_PROJECT_ID }),
+            signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
+          });
+          const payload = await response.json() as { result?: AnalysisResult; error?: string };
+          if (!response.ok || !payload.result) throw new Error(payload.error || '模型未返回结果');
+          modelResults.push(evaluateCase(testCase, payload.result));
+        } catch (error) {
+          modelError = error instanceof Error ? error.message : 'DeepSeek 评测失败';
+          break;
+        }
+      }
+      setQualityEvaluation({
+        baseline: baselinePayload.baseline,
+        deepseek: modelResults.length === EVAL_CASES.length ? summarizeEvaluation(modelResults, 'deepseek', 'deepseek-v4-flash') : null,
+        ...(modelError ? { error: modelError } : {}),
+      });
+      setNotice(modelResults.length === EVAL_CASES.length ? '质量评测完成，可对比规则基线与 DeepSeek。' : `规则基线完成；DeepSeek 未完成：${modelError}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '质量评测失败，请稍后重试。');
+    } finally {
+      setIsQualityEvaluating(false);
+    }
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-30 border-b border-border/80 bg-background/92 backdrop-blur-xl">
@@ -1186,6 +1344,7 @@ export default function Home() {
                     <TabsTrigger value="prompt">执行Prompt</TabsTrigger>
                     <TabsTrigger value="storyboard">分镜 {storyboard ? storyboard.shots.length : ''}</TabsTrigger>
                     <TabsTrigger value="states">状态库 {scenes.length || ''}</TabsTrigger>
+                    <TabsTrigger value="quality">质量评测</TabsTrigger>
                     <TabsTrigger value="delivery">交付包</TabsTrigger>
                   </TabsList>
                 </div>
@@ -1764,8 +1923,52 @@ export default function Home() {
                 </CardContent>
               </TabsContent>
 
+              <TabsContent value="quality" className="m-0">
+                <CardContent className="py-4">
+                  <div className="rounded-xl border border-cyan-200 bg-cyan-50/60 p-4">
+                    <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                      <div>
+                        <p className="text-sm font-semibold text-cyan-950">质量评测中心 · sceneflow-regression-v1</p>
+                        <p className="mt-1 text-xs leading-5 text-cyan-900">用固定剧本回归检查抽象情绪、人物缺失、动作不足和干净交互；规则基线立即完成，DeepSeek 复测用于模型对比。</p>
+                      </div>
+                      <Button onClick={() => void runQualityEvaluation()} disabled={busy}>
+                        {isQualityEvaluating ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <RefreshCcw data-icon="inline-start" />}
+                        {isQualityEvaluating ? '评测中…' : '运行质量评测'}
+                      </Button>
+                    </div>
+                  </div>
+                  {!qualityEvaluation ? (
+                    <div className="mt-4 rounded-xl border border-dashed border-cyan-200 bg-white/70 p-8 text-center text-xs text-muted-foreground">点击“运行质量评测”后，这里会显示规则基线与 DeepSeek 的通过率、问题召回率、误报率和平均分。</div>
+                  ) : (
+                    <div className="mt-4 space-y-4">
+                      <div className="grid gap-2 sm:grid-cols-4">
+                        {[['规则通过率', `${qualityEvaluation.baseline.passRate}%`], ['问题召回率', `${qualityEvaluation.baseline.issueRecall}%`], ['干净样例误报', `${qualityEvaluation.baseline.falsePositiveRate}%`], ['平均分', `${qualityEvaluation.baseline.averageScore}`]].map(([label, value]) => <div key={label} className="rounded-lg border border-border bg-card p-3"><p className="text-[11px] text-muted-foreground">{label}</p><p className="mt-1 text-xl font-semibold tabular-nums">{value}</p></div>)}
+                      </div>
+                      <div className="overflow-x-auto rounded-xl border border-border bg-card">
+                        <table className="w-full min-w-[620px] text-left text-xs"><thead className="bg-muted/50 text-muted-foreground"><tr><th className="px-3 py-2 font-medium">评测对象</th><th className="px-3 py-2 font-medium">通过率</th><th className="px-3 py-2 font-medium">问题召回率</th><th className="px-3 py-2 font-medium">干净样例误报</th><th className="px-3 py-2 font-medium">平均分</th></tr></thead><tbody><tr className="border-t border-border"><td className="px-3 py-2 font-semibold">规则基线 · rule-engine</td><td className="px-3 py-2">{qualityEvaluation.baseline.passRate}%</td><td className="px-3 py-2">{qualityEvaluation.baseline.issueRecall}%</td><td className="px-3 py-2">{qualityEvaluation.baseline.falsePositiveRate}%</td><td className="px-3 py-2">{qualityEvaluation.baseline.averageScore}</td></tr>{qualityEvaluation.deepseek && <tr className="border-t border-border"><td className="px-3 py-2 font-semibold">DeepSeek · deepseek-v4-flash</td><td className="px-3 py-2">{qualityEvaluation.deepseek.passRate}%</td><td className="px-3 py-2">{qualityEvaluation.deepseek.issueRecall}%</td><td className="px-3 py-2">{qualityEvaluation.deepseek.falsePositiveRate}%</td><td className="px-3 py-2">{qualityEvaluation.deepseek.averageScore}</td></tr>}</tbody></table>
+                      </div>
+                      {qualityEvaluation.error && <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">DeepSeek 复测未完成：{qualityEvaluation.error}。规则基线仍可用于本地回归。</p>}
+                      <div className="space-y-2">{qualityEvaluation.baseline.results.map((item) => <div key={item.id} className="flex flex-col gap-1 rounded-lg border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-semibold">{item.title}</p><p className="mt-1 text-[11px] text-muted-foreground">检测到：{item.issueTypes.join('、') || '无问题类型'} · {item.beatCount} 个节拍</p></div><Badge variant="outline" className={item.passed ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-800'}>{item.passed ? '通过' : '需关注'}</Badge></div>)}</div>
+                    </div>
+                  )}
+                </CardContent>
+              </TabsContent>
+
               <TabsContent value="delivery" className="m-0">
                 <CardContent className="py-4">
+                  <div className="mb-4 rounded-xl border border-fuchsia-200 bg-fuchsia-50/55 p-4">
+                    <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2"><ImagePlus className="size-4 text-fuchsia-700" /><p className="text-sm font-semibold text-fuchsia-950">成片画面连续性检查</p><Badge variant="outline" className="border-fuchsia-200 bg-white text-fuchsia-800">第④项</Badge></div>
+                        <p className="mt-1 text-xs leading-5 text-fuchsia-900">上传生成后的图片或视频，视频会在本机抽取一帧；视觉模型只收到代表帧和当前分镜状态，原始媒体不会保存。</p>
+                      </div>
+                      <div className="flex shrink-0 gap-2"><input ref={visualFileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(event) => void selectVisualFiles(event)} /><Button variant="outline" onClick={() => visualFileInputRef.current?.click()} disabled={busy}><Upload data-icon="inline-start" />选择图片/视频</Button><Button onClick={() => void runVisualReview()} disabled={busy || !storyboard || visualFiles.length === 0}>{isVisualReviewing ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <ScanSearch data-icon="inline-start" />}{isVisualReviewing ? '检查中…' : '检查成片画面'}</Button></div>
+                    </div>
+                    {visualFiles.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{visualFiles.map((file) => <Badge key={`${file.name}-${file.dataUrl.length}`} variant="secondary">{file.name}</Badge>)}</div>}
+                    {!storyboard && <p className="mt-3 text-xs text-amber-800">先生成分镜，系统才能把画面与人物、道具、站位和镜头状态逐项对照。</p>}
+                    {visualReview && <div className="mt-4 rounded-lg border border-fuchsia-100 bg-white/85 p-3"><div className="flex flex-wrap items-center justify-between gap-2"><p className="text-xs font-semibold text-fuchsia-950">检查结果 · {visualReview.framesAnalyzed} 帧 · {visualReview.score}/100</p><Badge variant="outline" className={visualReview.issues.some((issue) => issue.severity === 'hard') ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-emerald-200 bg-emerald-50 text-emerald-700'}>{visualReview.issues.length ? `${visualReview.issues.length} 项需复核` : '未发现明显问题'}</Badge></div><p className="mt-2 text-xs leading-5 text-slate-700">{visualReview.overview}</p>{visualReview.issues.length > 0 && <div className="mt-3 space-y-2">{visualReview.issues.map((issue) => <div key={issue.id} className="rounded-md border border-border/80 bg-muted/20 p-2.5"><div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className={issue.severity === 'hard' ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-amber-200 bg-amber-50 text-amber-800'}>{issue.severity === 'hard' ? '硬问题' : '软问题'}</Badge><Badge variant="outline">{visualIssueTypeLabels[issue.type]}</Badge><span className="text-[11px] text-muted-foreground">第 {issue.frameIndex + 1} 帧{issue.shotId ? ` · ${issue.shotId}` : ''}</span><p className="text-xs font-semibold">{issue.title}</p></div><p className="mt-1 text-[11px] leading-5 text-slate-700">{issue.detail}</p><p className="mt-1 text-[11px] leading-5 text-fuchsia-800"><span className="font-semibold">最小修复：</span>{issue.suggestion}</p></div>)}</div>}</div>}
+                    {visualReviewHistory.length > 0 && <div className="mt-3 rounded-lg border border-fuchsia-100 bg-white/70 p-3"><p className="text-[11px] font-semibold text-fuchsia-950">本场历史检查（只保留报告）</p><div className="mt-2 space-y-1.5">{visualReviewHistory.slice(0, 3).map((item) => <div key={item.id} className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground"><span className="truncate">{item.sourceName}</span><span className="shrink-0">{item.review.score}/100 · {new Date(item.createdAt).toLocaleString('zh-CN')}</span></div>)}</div></div>}
+                  </div>
                   {!storyboard ? (
                     <div className="grid min-h-[430px] place-items-center rounded-xl border border-dashed border-border bg-muted/25 p-8 text-center">
                       <div className="max-w-md">
