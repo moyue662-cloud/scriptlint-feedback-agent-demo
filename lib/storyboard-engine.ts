@@ -155,11 +155,12 @@ export function buildFallbackStoryboard(analysis: AnalysisResult): Omit<Storyboa
     spaceState: '沿用剧本中的场景空间',
     timeState: '沿用剧本中的时间',
   };
-  const shots: StoryboardShot[] = analysis.beats.map((beat, index) => {
+  const shots: StoryboardShot[] = [];
+  analysis.beats.forEach((beat, index) => {
     const previous = index > 0 ? shots[index - 1] : undefined;
     const startState = previous ? { ...previous.endState } : { ...baseState };
     const endState = { ...startState };
-    return {
+    shots.push({
       id: `S${String(index + 1).padStart(2, '0')}`,
       beatId: beat.id,
       durationSec: 4,
@@ -175,7 +176,7 @@ export function buildFallbackStoryboard(analysis: AnalysisResult): Omit<Storyboa
       endState,
       continuityReason: index === 0 ? '建立场景' : '连续承接',
       videoPrompt: `短剧写实镜头，${beat.actor}对${beat.receiver}执行一个清晰动作并完成回应；${beat.dialogue || beat.response || '无台词'}；保持人物身份、服装、道具、空间和时间连续。`,
-    };
+    });
   });
 
   return {

@@ -1,12 +1,12 @@
 import type { AnalysisResult } from '@/lib/script-engine';
-import { getEpisodeSummary, getLatestScene } from '@/lib/scene-db';
+import { getEpisodeSummary, getLatestScene, getPreviousScene } from '@/lib/scene-db';
 import { sceneContinuityContext } from '@/lib/scene-state';
 
 export const runtime = 'edge';
 
-const MODEL = 'deepseek-v4-pro';
+const MODEL = 'deepseek-v4-flash';
 const API_URL = 'https://api.deepseek.com/responses';
-const MODEL_TIMEOUT_MS = 26000;
+const MODEL_TIMEOUT_MS = 22000;
 const issueTypes = [
   'missing_character', 'abstract_emotion', 'missing_response', 'weak_action',
   'knowledge_risk', 'emotion_jump', 'continuity', 'dialogue_logic',
@@ -134,6 +134,8 @@ export async function POST(request: Request) {
       current?: AnalysisResult;
       loopCount?: number;
       episodeNumber?: number;
+      projectId?: string;
+      sceneId?: string;
     };
     const script = body.script?.trim() ?? '';
     if (!script) return Response.json({ error: '请输入剧本后再分析。' }, { status: 400 });
@@ -144,7 +146,9 @@ export async function POST(request: Request) {
 
     let previousScene = null;
     try {
-      previousScene = await getLatestScene();
+      previousScene = body.sceneId?.trim()
+        ? await getPreviousScene(body.sceneId.trim(), body.projectId?.trim() || undefined)
+        : await getLatestScene(body.projectId?.trim() || undefined);
     } catch (error) {
       console.warn('Previous scene context unavailable', error instanceof Error ? error.message : 'unknown error');
     }
@@ -154,7 +158,7 @@ export async function POST(request: Request) {
     let episodeSummary = null;
     if (body.episodeNumber) {
       try {
-        episodeSummary = await getEpisodeSummary(body.episodeNumber);
+        episodeSummary = await getEpisodeSummary(body.episodeNumber, body.projectId?.trim() || undefined);
       } catch (error) {
         console.warn('Episode summary context unavailable', error instanceof Error ? error.message : 'unknown error');
       }
@@ -194,7 +198,7 @@ export async function POST(request: Request) {
               schema: analysisSchema,
             },
           },
-          max_output_tokens: 10000,
+          max_output_tokens: 7000,
           store: false,
         }),
         signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),

@@ -270,6 +270,21 @@ export async function getLatestScene(projectId = DEFAULT_PROJECT_ID) {
   return row ? toStoredScene(row) : null;
 }
 
+export async function getPreviousScene(sceneId: string, projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const current = await database().prepare(
+    'SELECT project_id, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(sceneId, projectId).first<{ project_id: string; scene_order: number }>();
+  if (!current) return null;
+  const row = await database().prepare(
+    `SELECT id, project_id, scene_number, episode_number, scene_order, title, script, storyboard_json,
+       snapshot_json, delivery_tracking_json, created_at
+     FROM scene_states WHERE project_id = ? AND scene_order < ?
+     ORDER BY scene_order DESC, scene_number DESC LIMIT 1`,
+  ).bind(current.project_id, current.scene_order).first<SceneRow>();
+  return row ? toStoredScene(row) : null;
+}
+
 export async function getSceneById(id: string) {
   await ensureSchema();
   const row = await database().prepare(
@@ -291,6 +306,7 @@ export async function listSceneDetails(projectId = DEFAULT_PROJECT_ID, limit = 5
 }
 
 export async function saveScene(input: {
+  sceneId?: string;
   projectId?: string;
   episodeNumber?: number;
   title: string;
@@ -306,9 +322,14 @@ export async function saveScene(input: {
   const episodeNumber = Math.max(1, Math.min(999, Math.round(Number(input.episodeNumber) || 1)));
   const project = await getProject(projectId);
   if (!project) throw new Error('项目不存在');
-  const existing = await database().prepare(
-    'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE source_hash = ?',
-  ).bind(input.sourceHash).first<{ id: string; scene_number: number; episode_number: number; scene_order: number }>();
+  const existing = input.sceneId
+    ? await database().prepare(
+        'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
+      ).bind(input.sceneId, projectId).first<{ id: string; scene_number: number; episode_number: number; scene_order: number }>()
+    : await database().prepare(
+        'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE project_id = ? AND source_hash = ?',
+      ).bind(projectId, input.sourceHash).first<{ id: string; scene_number: number; episode_number: number; scene_order: number }>();
+  if (input.sceneId && !existing) throw new Error('场次不存在或不属于当前项目');
   const createdAt = new Date().toISOString();
   const shotIds = new Set(input.storyboard.shots.map((shot) => shot.id));
   const deliveryTracking = normalizeDeliveryTracking(input.deliveryTracking, shotIds);
@@ -333,8 +354,8 @@ export async function saveScene(input: {
   }
 
   const latest = await database().prepare(
-    'SELECT COALESCE(MAX(scene_number), 0) AS latest FROM scene_states',
-  ).first<{ latest: number }>();
+    'SELECT COALESCE(MAX(scene_number), 0) AS latest FROM scene_states WHERE project_id = ?',
+  ).bind(projectId).first<{ latest: number }>();
   const sceneNumber = Number(latest?.latest ?? 0) + 1;
   const latestOrder = await database().prepare(
     'SELECT COALESCE(MAX(scene_order), 0) AS latest FROM scene_states WHERE project_id = ?',

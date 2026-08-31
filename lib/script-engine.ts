@@ -68,8 +68,11 @@ const actionWords = [
 
 const characterStopWords = new Set([
   '原始剧本', '客厅', '晚上', '夜晚', '随后', '突然', '因为', '但是',
-  '然后', '此时',
+  '然后', '此时', '很生气地', '很尴尬地', '很紧张地', '很难过地',
+  '很害怕地', '很高兴地', '试图隐瞒', '继续追问', '质问父亲',
 ]);
+
+const characterNoisePattern = /很|非常|试图|继续|突然|然后|此时|正在|不相信|的$|地$/;
 
 function splitSentences(script: string) {
   return (
@@ -87,13 +90,13 @@ function detectCharacters(script: string) {
     const cleaned = name.replace(/[“”"'，。！？、\s]/g, '');
     if (
       cleaned.length >= 2 && cleaned.length <= 4 &&
-      !characterStopWords.has(cleaned) && !names.includes(cleaned)
+      !characterStopWords.has(cleaned) && !characterNoisePattern.test(cleaned) && !names.includes(cleaned)
     ) names.push(cleaned);
   };
 
-  for (const match of script.matchAll(/([\u4e00-\u9fa5]{2,4})[：:]/g)) add(match[1]);
+  for (const match of script.matchAll(/(?:^|[。！？!?\n])\s*([\u4e00-\u9fa5]{2,4})\s*[：:]/g)) add(match[1]);
   for (const match of script.matchAll(
-    /([\u4e00-\u9fa5]{2,4})(?=发现|看见|质问|询问|回答|解释|说道|说|问|喊|哭|笑|很生气|很尴尬|感到|试图|沉默|拿起|放下|转身)/g,
+    /([\u4e00-\u9fa5]{2,4})(?=发现|看见|质问|询问|回答|解释|说道|说|问|喊|哭|笑|感到|试图|沉默|拿起|放下|转身)/g,
   )) add(match[1]);
 
   ['父亲', '母亲', '女儿', '儿子', '老师', '医生', '老板'].forEach((name) => {

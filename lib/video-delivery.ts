@@ -53,7 +53,7 @@ export function buildVideoDeliveryPackage(
       durationSec: shot.durationSec,
       prompt: `${shot.videoPrompt} 构图比例 ${options.aspectRatio}，${options.resolution}，风格：${options.style}。`,
       dialogue: shot.dialogue || '无台词',
-      continuityLock: `开始状态：${shot.startState.characterPositions}；${shot.startState.propState}；${shot.startState.spaceState}；${shot.startState.timeState}。结束状态：${shot.endState.characterPositions}；${shot.endState.propState}；${shot.endState.spaceState}；${shot.endState.timeState}。`,
+      continuityLock: `开始状态：站位 ${shot.startState.characterPositions}；视线 ${shot.startState.gazeDirection}；道具 ${shot.startState.propState}；空间 ${shot.startState.spaceState}；时间 ${shot.startState.timeState}。结束状态：站位 ${shot.endState.characterPositions}；视线 ${shot.endState.gazeDirection}；道具 ${shot.endState.propState}；空间 ${shot.endState.spaceState}；时间 ${shot.endState.timeState}。`,
     })),
   };
 }

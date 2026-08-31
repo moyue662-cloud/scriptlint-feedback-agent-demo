@@ -59,7 +59,7 @@ const sampleScript = `客厅，夜晚。
 父亲很尴尬，试图隐瞒：“这不重要。”
 林晓不相信父亲的解释，继续追问。父亲沉默。`;
 
-const AI_REQUEST_TIMEOUT_MS = 30000;
+const AI_REQUEST_TIMEOUT_MS = 26000;
 const PIPELINE_LOOP_LIMIT = 3;
 
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
@@ -120,6 +120,7 @@ export default function Home() {
   const [pipelinePhase, setPipelinePhase] = useState<PipelinePhase>('idle');
   const [pipelineStep, setPipelineStep] = useState('');
   const [previousSceneNumber, setPreviousSceneNumber] = useState<number | null>(null);
+  const [loadedSceneId, setLoadedSceneId] = useState<string | null>(null);
   const [reviewedShotIds, setReviewedShotIds] = useState<string[]>([]);
   const [deliveryAspectRatio, setDeliveryAspectRatio] = useState<DeliveryAspectRatio>('9:16');
   const [deliveryCopied, setDeliveryCopied] = useState(false);
@@ -180,6 +181,7 @@ export default function Home() {
       setDeliveryCopied(false);
       setSceneTitle(detail.title);
       setEpisodeNumber(detail.episodeNumber);
+      setLoadedSceneId(detail.id);
       setPreviousSceneNumber(scenes.find((item) => item.episodeNumber === detail.episodeNumber && item.sceneOrder < detail.sceneOrder)?.sceneOrder ?? null);
       setNotice(`已载入第 ${detail.episodeNumber} 集第 ${detail.sceneOrder} 场，可继续修改或查看制作进度。`);
     } catch (error) {
@@ -338,6 +340,17 @@ export default function Home() {
       statusCounts,
     };
   }, [scenes]);
+  const episodeSceneNumbers = useMemo(() => {
+    const numbers = new Map<string, number>();
+    const grouped = new Map<number, StoredScene[]>();
+    scenes.forEach((scene) => grouped.set(scene.episodeNumber, [...(grouped.get(scene.episodeNumber) ?? []), scene]));
+    grouped.forEach((episodeScenes) => {
+      episodeScenes
+        .sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber)
+        .forEach((scene, index) => numbers.set(scene.id, index + 1));
+    });
+    return numbers;
+  }, [scenes]);
   const visibleTimeline = useMemo(() => {
     const visibleScenes = selectedEpisode === 'all'
       ? sceneTimeline.scenes
@@ -358,8 +371,11 @@ export default function Home() {
     };
   }, [sceneTimeline, selectedEpisode]);
   const episodeOptions = useMemo(
-    () => Array.from(new Set(scenes.map((scene) => scene.episodeNumber))).sort((a, b) => a - b),
-    [scenes],
+    () => Array.from(new Set([
+      ...scenes.map((scene) => scene.episodeNumber),
+      ...episodeSummaries.map((summary) => summary.episodeNumber),
+    ])).sort((a, b) => a - b),
+    [scenes, episodeSummaries],
   );
   const activeSummaryEpisode = summaryEpisode && episodeOptions.includes(summaryEpisode)
     ? summaryEpisode
@@ -388,8 +404,10 @@ export default function Home() {
   const blockedEpisodeCount = episodeReviews.filter((review) => review.status === 'blocked').length;
   const attentionEpisodeCount = episodeReviews.filter((review) => review.status === 'attention').length;
   const activeSavedScene = useMemo(
-    () => script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
-    [scenes, script],
+    () => loadedSceneId
+      ? scenes.find((scene) => scene.id === loadedSceneId) ?? null
+      : script.trim() ? scenes.find((scene) => scene.script.trim() === script.trim()) ?? null : null,
+    [loadedSceneId, scenes, script],
   );
   const hasHardStoryboardIssues = activeContinuityIssues.some((issue) => issue.severity === 'hard');
   const reviewedShotSet = useMemo(() => new Set(reviewedShotIds), [reviewedShotIds]);
@@ -417,7 +435,12 @@ export default function Home() {
     const response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, episodeNumber }),
+      body: JSON.stringify({
+        ...body,
+        episodeNumber,
+        projectId: project?.id || DEFAULT_PROJECT_ID,
+        ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
+      }),
       signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
     });
     const payload = await response.json() as {
@@ -664,6 +687,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           projectId: project?.id || DEFAULT_PROJECT_ID,
+          sceneId: loadedSceneId,
           episodeNumber,
           title: sceneTitle, script, analysis: result, storyboard,
           deliveryTracking: { statuses: deliveryShotStatuses },
@@ -694,6 +718,7 @@ export default function Home() {
     setDeliveryCopied(false);
     setDeliveryShotStatuses({});
     setSceneTitle('');
+    setLoadedSceneId(null);
     setEpisodeNumber(latestScene?.episodeNumber ?? 1);
     setPreviousSceneNumber(latestScene?.sceneOrder ?? null);
     setNotice(latestScene ? `已载入第 ${latestScene.episodeNumber} 集第 ${latestScene.sceneOrder} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
@@ -1405,7 +1430,7 @@ export default function Home() {
                                 >
                                   {index < episode.scenes.length - 1 && <span className="absolute -right-3 top-1/2 hidden h-px w-3 bg-indigo-200 xl:block" aria-hidden="true" />}
                                   <div className="flex items-start justify-between gap-2">
-                                    <div className="flex min-w-0 items-center gap-2"><span className="grid size-6 shrink-0 place-items-center rounded-full bg-indigo-100 text-xs font-semibold text-indigo-800">{scene.sceneOrder}</span><p className="line-clamp-1 text-sm font-semibold text-indigo-950">{scene.title}</p></div>
+                                    <div className="flex min-w-0 items-center gap-2"><span className="grid size-6 shrink-0 place-items-center rounded-full bg-indigo-100 text-xs font-semibold text-indigo-800">{index + 1}</span><p className="line-clamp-1 text-sm font-semibold text-indigo-950">{scene.title}</p></div>
                                     <Badge variant="outline" className={sceneStatusClasses[scene.summary.status]}>{sceneStatusLabels[scene.summary.status]}</Badge>
                                   </div>
                                   <div className="mt-3 grid grid-cols-3 gap-2 text-[11px] text-muted-foreground">
@@ -1415,8 +1440,8 @@ export default function Home() {
                                   </div>
                                   <div className="mt-2 flex items-center gap-2"><Progress value={scene.summary.productionProgress} className="h-1.5 flex-1" /><span className="text-[11px] tabular-nums text-muted-foreground">{scene.summary.productionProgress}%</span></div>
                                   <div className="mt-3 flex justify-end gap-1">
-                                    <Button size="sm" variant="ghost" aria-label={`第 ${scene.sceneOrder} 场上移`} onClick={() => void moveScene(scene.id, 'move-up')} disabled={busy || index === 0}><ArrowUp className="size-3.5" /></Button>
-                                    <Button size="sm" variant="ghost" aria-label={`第 ${scene.sceneOrder} 场下移`} onClick={() => void moveScene(scene.id, 'move-down')} disabled={busy || index === episode.scenes.length - 1}><ArrowDown className="size-3.5" /></Button>
+                                    <Button size="sm" variant="ghost" aria-label={`第 ${index + 1} 场上移`} onClick={() => void moveScene(scene.id, 'move-up')} disabled={busy || index === 0}><ArrowUp className="size-3.5" /></Button>
+                                    <Button size="sm" variant="ghost" aria-label={`第 ${index + 1} 场下移`} onClick={() => void moveScene(scene.id, 'move-down')} disabled={busy || index === episode.scenes.length - 1}><ArrowDown className="size-3.5" /></Button>
                                   </div>
                                 </div>
                               ))}
@@ -1440,7 +1465,7 @@ export default function Home() {
                       {scenes.map((scene, index) => (
                         <article key={scene.id} className={`rounded-xl border p-4 ${index === 0 ? 'border-sky-200 bg-sky-50/35' : 'border-border bg-card'}`}>
                           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2"><Badge className="bg-sky-700">第 {scene.episodeNumber} 集 · 第 {scene.sceneOrder} 场</Badge><span className="text-sm font-semibold">{scene.title}</span>{index === 0 && <Badge variant="outline">当前继承源</Badge>}</div>
+                            <div className="flex items-center gap-2"><Badge className="bg-sky-700">第 {scene.episodeNumber} 集 · 第 {episodeSceneNumbers.get(scene.id) ?? scene.sceneOrder} 场</Badge><span className="text-sm font-semibold">{scene.title}</span>{index === 0 && <Badge variant="outline">当前继承源</Badge>}</div>
                             <div className="flex items-center gap-2"><span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span><Button size="sm" variant="outline" onClick={() => void loadSavedScene(scene)} disabled={busy}>{isSceneLoading ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <FileText data-icon="inline-start" />}载入本场</Button></div>
                           </div>
                           <div className="grid gap-2 sm:grid-cols-3">
@@ -1505,7 +1530,7 @@ export default function Home() {
                       )}
                       <div className="mb-4 rounded-xl border border-border bg-card p-4">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div><p className="text-sm font-semibold">制作跟踪</p><p className="mt-1 text-xs text-muted-foreground">已提交 {deliveryTracking.submittedCount}/{deliveryTracking.total} · 已验收 {deliveryTracking.acceptedCount}/{deliveryTracking.total}</p><p className="mt-1 text-[11px] text-muted-foreground">{activeSavedScene ? `已关联第 ${activeSavedScene.episodeNumber} 集第 ${activeSavedScene.sceneOrder} 场，进度自动保存` : '先保存场次状态，进度才能跨刷新保留'}</p></div>
+                          <div><p className="text-sm font-semibold">制作跟踪</p><p className="mt-1 text-xs text-muted-foreground">已提交 {deliveryTracking.submittedCount}/{deliveryTracking.total} · 已验收 {deliveryTracking.acceptedCount}/{deliveryTracking.total}</p><p className="mt-1 text-[11px] text-muted-foreground">{activeSavedScene ? `已关联第 ${activeSavedScene.episodeNumber} 集第 ${episodeSceneNumbers.get(activeSavedScene.id) ?? activeSavedScene.sceneOrder} 场，进度自动保存` : '先保存场次状态，进度才能跨刷新保留'}</p></div>
                           <Badge variant="secondary" className={deliveryTracking.complete ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : ''}>{deliveryTracking.complete ? '本场已验收' : `已验收 ${deliveryTracking.acceptedCount}/${deliveryTracking.total}`}</Badge>
                         </div>
                         <Progress value={deliveryTracking.total ? (deliveryTracking.acceptedCount / deliveryTracking.total) * 100 : 0} className="mt-3 [&_[data-slot=progress-indicator]]:bg-emerald-600" />

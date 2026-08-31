@@ -25,7 +25,10 @@ export async function PATCH(request: Request) {
           listEpisodeSummaries(DEFAULT_PROJECT_ID),
         ]);
         if (scenes.length === 0) return Response.json({ error: '至少保存一个场次后才能完成整部项目终审。' }, { status: 409 });
-        const episodeNumbers = Array.from(new Set(scenes.map((scene) => scene.episodeNumber))).sort((a, b) => a - b);
+        const episodeNumbers = Array.from(new Set([
+          ...scenes.map((scene) => scene.episodeNumber),
+          ...summaries.map((summary) => summary.episodeNumber),
+        ])).sort((a, b) => a - b);
         const reviews = episodeNumbers.map((episodeNumber) => buildEpisodeReview(
           episodeNumber,
           scenes,

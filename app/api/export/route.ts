@@ -12,7 +12,10 @@ export async function GET() {
       listSceneDetails(DEFAULT_PROJECT_ID, 500),
     ]);
     if (!project) return Response.json({ error: '项目尚未初始化。' }, { status: 404 });
-    const episodeNumbers = Array.from(new Set(scenes.map((scene) => scene.episodeNumber))).sort((a, b) => a - b);
+    const episodeNumbers = Array.from(new Set([
+      ...scenes.map((scene) => scene.episodeNumber),
+      ...summaries.map((summary) => summary.episodeNumber),
+    ])).sort((a, b) => a - b);
     const episodes = episodeNumbers.map((episodeNumber) => {
       const summary = summaries.find((item) => item.episodeNumber === episodeNumber) ?? null;
       const review = buildEpisodeReview(episodeNumber, scenes, summary);

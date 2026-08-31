@@ -1,13 +1,77 @@
 import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '@/lib/scene-state';
 import { getLatestScene, getSceneById, listScenes, moveScene, moveSceneBefore, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
-import type { StoryboardResult } from '@/lib/storyboard-engine';
+import { finalizeStoryboard, type StoryboardResult } from '@/lib/storyboard-engine';
 
 export const runtime = 'edge';
 
 async function hashSource(script: string) {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(script.trim()));
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasStringFields(value: unknown, fields: string[]) {
+  return isRecord(value) && fields.every((field) => typeof value[field] === 'string');
+}
+
+const analysisIssueTypes = new Set([
+  'missing_character', 'abstract_emotion', 'missing_response', 'weak_action',
+  'knowledge_risk', 'emotion_jump', 'continuity', 'dialogue_logic',
+  'character_consistency',
+]);
+
+const continuityIssueTypes = new Set([
+  'beat_coverage', 'character_position', 'gaze_direction', 'prop_state',
+  'space_state', 'time_state', 'shot_density', 'shot_identity',
+]);
+
+function isValidScriptIssue(value: unknown) {
+  if (!isRecord(value)) return false;
+  return hasStringFields(value, ['id', 'targetId', 'title', 'detail', 'suggestion'])
+    && (value.severity === 'hard' || value.severity === 'soft')
+    && typeof value.type === 'string' && analysisIssueTypes.has(value.type)
+    && typeof value.resolved === 'boolean';
+}
+
+function isValidContinuityIssue(value: unknown) {
+  if (!isRecord(value)) return false;
+  return hasStringFields(value, ['id', 'fromShotId', 'toShotId', 'detail', 'suggestion'])
+    && (value.severity === 'hard' || value.severity === 'soft')
+    && typeof value.type === 'string' && continuityIssueTypes.has(value.type)
+    && typeof value.resolved === 'boolean';
+}
+
+function isValidAnalysis(value: unknown): value is AnalysisResult {
+  if (!isRecord(value) || !Array.isArray(value.characters) || !Array.isArray(value.beats) || !Array.isArray(value.issues)) return false;
+  if (value.characters.length > 12 || value.beats.length < 1 || value.beats.length > 30 || value.issues.length > 40) return false;
+  if (!value.characters.every((character) => typeof character === 'string' && character.trim().length > 0)) return false;
+  if (typeof value.score !== 'number' || !Number.isFinite(value.score) || value.score < 0 || value.score > 100 || typeof value.executionPrompt !== 'string') return false;
+  if (!value.issues.every(isValidScriptIssue)) return false;
+  return value.beats.every((beat) => hasStringFields(beat, [
+    'id', 'source', 'actor', 'receiver', 'trigger', 'goal', 'action', 'dialogue',
+    'reaction', 'response', 'stateBefore', 'stateAfter',
+  ]));
+}
+
+function isValidStoryboard(value: unknown): value is StoryboardResult {
+  if (!isRecord(value) || !Array.isArray(value.shots) || !Array.isArray(value.issues)) return false;
+  if (value.shots.length < 1 || value.shots.length > 60 || value.issues.length > 40) return false;
+  if (typeof value.modelPrompt !== 'string') return false;
+  if (!value.issues.every(isValidContinuityIssue)) return false;
+  return value.shots.every((shot) => {
+    if (!isRecord(shot) || typeof shot.durationSec !== 'number' || !Number.isFinite(shot.durationSec)) return false;
+    if (shot.durationSec < 1 || shot.durationSec > 15) return false;
+    if (!hasStringFields(shot, [
+      'id', 'beatId', 'shotSize', 'cameraAngle', 'cameraMovement', 'focus', 'action',
+      'dialogue', 'sound', 'transition', 'continuityReason', 'videoPrompt',
+    ])) return false;
+    return hasStringFields(shot.startState, ['characterPositions', 'gazeDirection', 'propState', 'spaceState', 'timeState'])
+      && hasStringFields(shot.endState, ['characterPositions', 'gazeDirection', 'propState', 'spaceState', 'timeState']);
+  });
 }
 
 export async function GET(request: Request) {
@@ -35,6 +99,7 @@ export async function POST(request: Request) {
     const body = await request.json() as {
       title?: string;
       projectId?: string;
+      sceneId?: string | null;
       episodeNumber?: number;
       script?: string;
       analysis?: AnalysisResult;
@@ -42,19 +107,28 @@ export async function POST(request: Request) {
       deliveryTracking?: unknown;
     };
     const script = body.script?.trim() ?? '';
-    if (!script || !body.analysis?.beats?.length || !body.storyboard?.shots?.length) {
+    if (!script || script.length > 12000 || !isValidAnalysis(body.analysis) || !isValidStoryboard(body.storyboard)) {
       return Response.json({ error: '请先完成本场剧本分析和分镜，再保存场次状态。' }, { status: 400 });
     }
-    const snapshot = buildSceneSnapshot(body.analysis, body.storyboard);
+    const validatedStoryboard = finalizeStoryboard({
+      shots: body.storyboard.shots,
+      issues: body.storyboard.issues,
+      modelPrompt: body.storyboard.modelPrompt,
+    }, body.analysis);
+    if (validatedStoryboard.issues.some((issue) => !issue.resolved && issue.severity === 'hard')) {
+      return Response.json({ error: '场次仍存在未解决的硬性连续性问题，不能保存。' }, { status: 409 });
+    }
+    const snapshot = buildSceneSnapshot(body.analysis, validatedStoryboard);
     const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;
     const saved = await saveScene({
+      sceneId: body.sceneId?.trim() || undefined,
       title: body.title?.trim().slice(0, 80) || '未命名场次',
       projectId,
       episodeNumber: body.episodeNumber,
       sourceHash: await hashSource(script),
       script,
       analysis: body.analysis,
-      storyboard: body.storyboard,
+      storyboard: validatedStoryboard,
       deliveryTracking: body.deliveryTracking,
       snapshot,
     });
@@ -62,6 +136,9 @@ export async function POST(request: Request) {
     return Response.json({ saved, latest, continuityContext: latest ? sceneContinuityContext(latest) : null });
   } catch (error) {
     console.error('Scene state save failed', error instanceof Error ? error.message : 'unknown error');
+    if (error instanceof Error && error.message.includes('场次不存在')) {
+      return Response.json({ error: error.message }, { status: 404 });
+    }
     return Response.json({ error: '场次状态保存失败，请稍后重试。' }, { status: 500 });
   }
 }
