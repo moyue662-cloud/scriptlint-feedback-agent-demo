@@ -62,6 +62,14 @@ export interface StoryboardRepairScope {
   editableBeatIds: string[];
 }
 
+export function getStoryboardBudget(analysis: AnalysisResult) {
+  const beatCount = Math.max(1, analysis.beats.length);
+  return {
+    maxShots: Math.max(beatCount, Math.min(12, beatCount * 2)),
+    maxDurationSec: Math.max(18, Math.min(90, beatCount * 10)),
+  };
+}
+
 const stateChecks: Array<{
   key: keyof ShotState;
   type: ContinuityIssueType;
@@ -120,9 +128,10 @@ export function enforceStoryboardRepairScope(
     extraByBeat.set(shot.beatId, extras);
   });
 
-  const shots: StoryboardShot[] = [];
+  let shots: StoryboardShot[] = [];
   current.shots.forEach((shot, index) => {
-    shots.push(editableIds.has(shot.id) ? (candidateById.get(shot.id) ?? shot) : shot);
+    const replacement = editableIds.has(shot.id) ? candidateById.get(shot.id) : shot;
+    if (replacement) shots.push(replacement);
     const isLastShotForBeat = current.shots[index + 1]?.beatId !== shot.beatId;
     if (isLastShotForBeat && editableBeatIds.has(shot.beatId)) {
       shots.push(...(extraByBeat.get(shot.beatId) ?? []));
@@ -130,6 +139,17 @@ export function enforceStoryboardRepairScope(
     }
   });
   extraByBeat.forEach((extras) => shots.push(...extras));
+
+  if (shots.length > current.shots.length) {
+    const removableExtras = new Set(shots.filter((shot) => !currentIds.has(shot.id)).map((shot) => shot.id));
+    let overflow = shots.length - current.shots.length;
+    shots = shots.filter((shot) => {
+      if (overflow <= 0 || !removableExtras.has(shot.id)) return true;
+      overflow -= 1;
+      removableExtras.delete(shot.id);
+      return false;
+    });
+  }
 
   return { ...candidate, shots };
 }
@@ -272,6 +292,23 @@ export function finalizeStoryboard(
     });
   });
 
+  const budget = getStoryboardBudget(analysis);
+  const totalDurationSec = Math.round(shots.reduce((sum, shot) => sum + shot.durationSec, 0) * 10) / 10;
+  if (shots.length > budget.maxShots && shots.length > 0) {
+    addIssue({
+      severity: 'hard', type: 'shot_density', fromShotId: shots[0].id, toShotId: shots.at(-1)?.id ?? shots[0].id,
+      detail: `本场共 ${shots.length} 个镜头，超过当前 ${analysis.beats.length} 个交互节拍的 ${budget.maxShots} 镜头预算。`,
+      suggestion: '合并重复反应和无信息增量镜头，保留推动冲突或交代连续性所必需的镜头。',
+    });
+  }
+  if (totalDurationSec > budget.maxDurationSec && shots.length > 0) {
+    addIssue({
+      severity: 'soft', type: 'shot_density', fromShotId: shots[0].id, toShotId: shots.at(-1)?.id ?? shots[0].id,
+      detail: `本场预计 ${totalDurationSec} 秒，超过 ${budget.maxDurationSec} 秒的紧凑短剧预算。`,
+      suggestion: '缩短停顿、合并重复动作，并删除没有新增剧情信息的镜头。',
+    });
+  }
+
   analysis.beats.forEach((beat) => {
     if (!shots.some((shot) => shot.beatId === beat.id)) {
       addIssue({
@@ -289,7 +326,7 @@ export function finalizeStoryboard(
     ...raw,
     shots,
     issues,
-    totalDurationSec: Math.round(shots.reduce((sum, shot) => sum + shot.durationSec, 0) * 10) / 10,
+    totalDurationSec,
     continuityScore: Math.max(0, Math.min(100, 100 - hardCount * 14 - softCount * 5)),
     generatedAt: new Date().toISOString(),
   };

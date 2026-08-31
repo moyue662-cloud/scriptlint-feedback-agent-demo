@@ -4,6 +4,7 @@ import {
   buildFallbackStoryboard,
   enforceStoryboardRepairScope,
   finalizeStoryboard,
+  getStoryboardBudget,
   getStoryboardRepairScope,
   type StoryboardResult,
 } from '@/lib/storyboard-engine';
@@ -98,7 +99,8 @@ const repairInstructions = `${instructions}
 2. lockedShotIds 中的镜头必须原样返回，所有字段、顺序和编号都不得改变或删除。
 3. 逐项解决 activeIssues，并保证修改后镜头与前后锁定镜头的状态能够衔接。
 4. 不得改变已经确定的剧情事实、人物关系、台词信息和节拍顺序。
-5. 若一个问题无法在授权范围内安全解决，保留原镜头并继续在 issues 中说明，不得扩大修改范围。`;
+5. 修复后的镜头总数不得超过当前分镜；优先删减、合并或简化，不得通过持续拆镜制造镜头膨胀。
+6. 若一个问题无法在授权范围内安全解决，保留原镜头并继续在 issues 中说明，不得扩大修改范围。`;
 
 function getOutputText(payload: Record<string, unknown>) {
   const choices = Array.isArray(payload.choices) ? payload.choices : [];
@@ -166,9 +168,11 @@ export async function POST(request: Request) {
       return Response.json({ error: '分镜修复最多运行3轮。' }, { status: 400 });
     }
     const scope = repairMode && body.current ? getStoryboardRepairScope(body.current) : null;
+    const budget = getStoryboardBudget(body.analysis);
+    const budgetContext = `\n\n本场硬预算：最多 ${budget.maxShots} 个镜头、预计总时长最多 ${budget.maxDurationSec} 秒。每个节拍通常使用 1 个镜头，确有必要的行动—反应最多拆为 2 个。不得用重复表情、重复停顿或无信息增量反应填充镜头。`;
     const input = repairMode && body.current && scope
-      ? `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}\n\n当前分镜：\n${JSON.stringify(body.current)}\n\nactiveIssues：\n${JSON.stringify(body.current.issues.filter((issue) => !issue.resolved))}\n\n修复范围：\n${JSON.stringify(scope)}`
-      : `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}`;
+      ? `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}\n\n当前分镜：\n${JSON.stringify(body.current)}\n\nactiveIssues：\n${JSON.stringify(body.current.issues.filter((issue) => !issue.resolved))}\n\n修复范围：\n${JSON.stringify(scope)}${budgetContext}`
+      : `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}${budgetContext}`;
 
     let parsed: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>;
     let usedFallback = false;
