@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Check, ChevronRight, Clipboard, Download,
   Camera, Clock, Database, FileText, Film, GitBranch, GripVertical, Loader2, Play,
-  PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Users,
+  PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -108,6 +108,8 @@ export default function Home() {
   const [isSceneSaving, setIsSceneSaving] = useState(false);
   const [isSceneLoading, setIsSceneLoading] = useState(false);
   const [isSceneReordering, setIsSceneReordering] = useState(false);
+  const [isSceneDeleting, setIsSceneDeleting] = useState(false);
+  const [pendingDeleteSceneId, setPendingDeleteSceneId] = useState<string | null>(null);
   const [isEpisodeSummarySaving, setIsEpisodeSummarySaving] = useState(false);
   const [draggingSceneId, setDraggingSceneId] = useState<string | null>(null);
   const [dragOverSceneId, setDragOverSceneId] = useState<string | null>(null);
@@ -182,8 +184,12 @@ export default function Home() {
       setSceneTitle(detail.title);
       setEpisodeNumber(detail.episodeNumber);
       setLoadedSceneId(detail.id);
-      setPreviousSceneNumber(scenes.find((item) => item.episodeNumber === detail.episodeNumber && item.sceneOrder < detail.sceneOrder)?.sceneOrder ?? null);
-      setNotice(`已载入第 ${detail.episodeNumber} 集第 ${detail.sceneOrder} 场，可继续修改或查看制作进度。`);
+      const episodeSceneNumber = episodeSceneNumbers.get(detail.id) ?? detail.sceneOrder;
+      const previous = [...scenes]
+        .filter((item) => item.episodeNumber === detail.episodeNumber && item.sceneOrder < detail.sceneOrder)
+        .sort((a, b) => b.sceneOrder - a.sceneOrder)[0];
+      setPreviousSceneNumber(previous ? episodeSceneNumbers.get(previous.id) ?? previous.sceneOrder : null);
+      setNotice(`已载入第 ${detail.episodeNumber} 集第 ${episodeSceneNumber} 场，可继续修改或查看制作进度。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '场次载入失败，请稍后重试。');
     } finally {
@@ -315,7 +321,7 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isEpisodeSummarySaving || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -340,7 +346,7 @@ export default function Home() {
       statusCounts,
     };
   }, [scenes]);
-  const episodeSceneNumbers = useMemo(() => {
+  const episodeSceneNumbers = (() => {
     const numbers = new Map<string, number>();
     const grouped = new Map<number, StoredScene[]>();
     scenes.forEach((scene) => grouped.set(scene.episodeNumber, [...(grouped.get(scene.episodeNumber) ?? []), scene]));
@@ -350,7 +356,7 @@ export default function Home() {
         .forEach((scene, index) => numbers.set(scene.id, index + 1));
     });
     return numbers;
-  }, [scenes]);
+  })();
   const visibleTimeline = useMemo(() => {
     const visibleScenes = selectedEpisode === 'all'
       ? sceneTimeline.scenes
@@ -694,12 +700,13 @@ export default function Home() {
         }),
       });
       const payload = await response.json() as {
-        saved?: { sceneNumber: number; episodeNumber: number; sceneOrder: number; updated: boolean };
+        saved?: { id: string; sceneNumber: number; episodeNumber: number; sceneOrder: number; episodeSceneNumber: number | null; updated: boolean };
         error?: string;
       };
       if (!response.ok || !payload.saved) throw new Error(payload.error || '场次状态保存失败');
       await Promise.all([loadScenes(), loadProject()]);
-      setNotice(`第 ${payload.saved.episodeNumber} 集第 ${payload.saved.sceneOrder} 场状态${payload.saved.updated ? '已更新' : '已保存'}，编译下一场时会自动继承。`);
+      setLoadedSceneId(payload.saved.id);
+      setNotice(`第 ${payload.saved.episodeNumber} 集第 ${payload.saved.episodeSceneNumber ?? payload.saved.sceneOrder} 场状态${payload.saved.updated ? '已更新' : '已保存'}，编译下一场时会自动继承。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '场次状态保存失败，请稍后重试。');
     } finally {
@@ -720,8 +727,8 @@ export default function Home() {
     setSceneTitle('');
     setLoadedSceneId(null);
     setEpisodeNumber(latestScene?.episodeNumber ?? 1);
-    setPreviousSceneNumber(latestScene?.sceneOrder ?? null);
-    setNotice(latestScene ? `已载入第 ${latestScene.episodeNumber} 集第 ${latestScene.sceneOrder} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
+    setPreviousSceneNumber(latestScene ? episodeSceneNumbers.get(latestScene.id) ?? latestScene.sceneOrder : null);
+    setNotice(latestScene ? `已载入第 ${latestScene.episodeNumber} 集第 ${episodeSceneNumbers.get(latestScene.id) ?? latestScene.sceneOrder} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
     window.localStorage.setItem('scene-flow-script', '');
   }
 
@@ -746,6 +753,27 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : '场次顺序调整失败，请稍后重试。');
     } finally {
       setIsSceneReordering(false);
+    }
+  }
+
+  async function deleteSavedScene(scene: StoredScene) {
+    if (busy || pendingDeleteSceneId !== scene.id) return;
+    setIsSceneDeleting(true);
+    try {
+      const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`, {
+        method: 'DELETE',
+      });
+      const payload = await response.json() as { scenes?: StoredScene[]; error?: string };
+      if (!response.ok || !payload.scenes) throw new Error(payload.error || '场次删除失败');
+      setScenes(payload.scenes);
+      if (loadedSceneId === scene.id) setLoadedSceneId(null);
+      setPendingDeleteSceneId(null);
+      await loadProject();
+      setNotice(`“${scene.title}”已删除，后续场次顺序和继承关系已重新计算。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '场次删除失败，请稍后重试。');
+    } finally {
+      setIsSceneDeleting(false);
     }
   }
 
@@ -1466,7 +1494,18 @@ export default function Home() {
                         <article key={scene.id} className={`rounded-xl border p-4 ${index === 0 ? 'border-sky-200 bg-sky-50/35' : 'border-border bg-card'}`}>
                           <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                             <div className="flex items-center gap-2"><Badge className="bg-sky-700">第 {scene.episodeNumber} 集 · 第 {episodeSceneNumbers.get(scene.id) ?? scene.sceneOrder} 场</Badge><span className="text-sm font-semibold">{scene.title}</span>{index === 0 && <Badge variant="outline">当前继承源</Badge>}</div>
-                            <div className="flex items-center gap-2"><span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span><Button size="sm" variant="outline" onClick={() => void loadSavedScene(scene)} disabled={busy}>{isSceneLoading ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <FileText data-icon="inline-start" />}载入本场</Button></div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span>
+                              <Button size="sm" variant="outline" onClick={() => void loadSavedScene(scene)} disabled={busy}>{isSceneLoading ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <FileText data-icon="inline-start" />}载入本场</Button>
+                              {pendingDeleteSceneId === scene.id ? (
+                                <>
+                                  <Button size="sm" variant="destructive" onClick={() => void deleteSavedScene(scene)} disabled={busy}>{isSceneDeleting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Trash2 data-icon="inline-start" />}确定删除</Button>
+                                  <Button size="sm" variant="ghost" onClick={() => setPendingDeleteSceneId(null)} disabled={busy}>取消</Button>
+                                </>
+                              ) : (
+                                <Button size="sm" variant="ghost" className="text-muted-foreground hover:text-destructive" onClick={() => setPendingDeleteSceneId(scene.id)} disabled={busy} aria-label={`删除${scene.title}`}><Trash2 className="size-3.5" />删除</Button>
+                              )}
+                            </div>
                           </div>
                           <div className="grid gap-2 sm:grid-cols-3">
                             <StateField label="空间 / 时间" value={`${scene.snapshot.spaceState} · ${scene.snapshot.timeState}`} />

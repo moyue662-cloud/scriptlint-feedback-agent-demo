@@ -337,10 +337,10 @@ export async function saveScene(input: {
 
   if (existing) {
     await database().prepare(
-      `UPDATE scene_states SET episode_number = ?, title = ?, script = ?, analysis_json = ?, storyboard_json = ?,
+      `UPDATE scene_states SET episode_number = ?, title = ?, source_hash = ?, script = ?, analysis_json = ?, storyboard_json = ?,
        snapshot_json = ?, delivery_tracking_json = ?, created_at = ? WHERE id = ?`,
     ).bind(
-      episodeNumber, input.title, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
+      episodeNumber, input.title, input.sourceHash, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
       JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt, existing.id,
     ).run();
     await invalidateProjectApproval(projectId);
@@ -373,6 +373,48 @@ export async function saveScene(input: {
   ).run();
   await invalidateProjectApproval(projectId);
   return { id, sceneNumber, episodeNumber, sceneOrder, updated: false };
+}
+
+export async function getEpisodeSceneNumber(sceneId: string, projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const current = await database().prepare(
+    'SELECT scene_number, episode_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(sceneId, projectId).first<{ scene_number: number; episode_number: number; scene_order: number }>();
+  if (!current) return null;
+  const row = await database().prepare(
+    `SELECT COUNT(*) AS total FROM scene_states
+     WHERE project_id = ? AND episode_number = ?
+       AND (scene_order < ? OR (scene_order = ? AND scene_number <= ?))`,
+  ).bind(projectId, current.episode_number, current.scene_order, current.scene_order, current.scene_number)
+    .first<{ total: number }>();
+  return Math.max(1, Number(row?.total) || 1);
+}
+
+export async function deleteScene(input: { sceneId: string; projectId?: string }) {
+  await ensureSchema();
+  const db = database();
+  const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
+  const current = await db.prepare(
+    'SELECT id, project_id FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(input.sceneId, projectId).first<{ id: string; project_id: string }>();
+  if (!current) return null;
+
+  await db.prepare('DELETE FROM scene_states WHERE id = ? AND project_id = ?')
+    .bind(current.id, current.project_id).run();
+  const remaining = await db.prepare(
+    'SELECT id FROM scene_states WHERE project_id = ? ORDER BY scene_order ASC, scene_number ASC',
+  ).bind(current.project_id).all<{ id: string }>();
+  if (remaining.results.length > 0) {
+    const temporaryBase = remaining.results.length + 1000000;
+    await db.batch(remaining.results.map((row, index) => db.prepare(
+      'UPDATE scene_states SET scene_order = ? WHERE id = ?',
+    ).bind(temporaryBase + index, row.id)));
+    await db.batch(remaining.results.map((row, index) => db.prepare(
+      'UPDATE scene_states SET scene_order = ? WHERE id = ?',
+    ).bind(index + 1, row.id)));
+  }
+  await invalidateProjectApproval(current.project_id);
+  return { id: current.id, projectId: current.project_id };
 }
 
 export async function moveScene(input: { sceneId: string; direction: 'up' | 'down' }) {

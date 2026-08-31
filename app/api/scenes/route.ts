@@ -1,5 +1,5 @@
 import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '@/lib/scene-state';
-import { getLatestScene, getSceneById, listScenes, moveScene, moveSceneBefore, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
+import { deleteScene, getEpisodeSceneNumber, getLatestScene, getSceneById, listScenes, moveScene, moveSceneBefore, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import { finalizeStoryboard, type StoryboardResult } from '@/lib/storyboard-engine';
 
@@ -132,14 +132,31 @@ export async function POST(request: Request) {
       deliveryTracking: body.deliveryTracking,
       snapshot,
     });
+    const episodeSceneNumber = await getEpisodeSceneNumber(saved.id, projectId);
     const latest = await getLatestScene(projectId);
-    return Response.json({ saved, latest, continuityContext: latest ? sceneContinuityContext(latest) : null });
+    return Response.json({ saved: { ...saved, episodeSceneNumber }, latest, continuityContext: latest ? sceneContinuityContext(latest) : null });
   } catch (error) {
     console.error('Scene state save failed', error instanceof Error ? error.message : 'unknown error');
     if (error instanceof Error && error.message.includes('场次不存在')) {
       return Response.json({ error: error.message }, { status: 404 });
     }
     return Response.json({ error: '场次状态保存失败，请稍后重试。' }, { status: 500 });
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const url = new URL(request.url);
+    const sceneId = url.searchParams.get('id')?.trim() ?? '';
+    const projectId = url.searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
+    if (!sceneId) return Response.json({ error: '缺少要删除的场次。' }, { status: 400 });
+    const deleted = await deleteScene({ sceneId, projectId });
+    if (!deleted) return Response.json({ error: '找不到要删除的场次。' }, { status: 404 });
+    const scenes = await listScenes(projectId);
+    return Response.json({ deleted, scenes });
+  } catch (error) {
+    console.error('Scene deletion failed', error instanceof Error ? error.message : 'unknown error');
+    return Response.json({ error: '场次删除失败，请稍后重试。' }, { status: 500 });
   }
 }
 
