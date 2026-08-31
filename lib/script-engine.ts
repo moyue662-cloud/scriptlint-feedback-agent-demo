@@ -78,7 +78,7 @@ function splitSentences(script: string) {
   return (
     script
       .replace(/\r/g, '')
-      .match(/[^。！？!?\n]+[。！？!?]?/g)
+      .match(/[^。！？!?\n]+(?:[。！？!?][”"'’』】）]?|(?=\n)|$)/g)
       ?.map((sentence) => sentence.trim())
       .filter(Boolean) ?? []
   );
@@ -128,8 +128,8 @@ function inferAction(sentence: string, emotion?: string) {
   if (actionWords.some((word) => sentence.includes(word))) {
     return sentence
       .replace(/[“"]([^”"]+)[”"]/g, '')
-      .replace(/很(?:生气|尴尬|紧张|难过|害怕|高兴)/g, '')
-      .replace(/[，。！？!?]+$/g, '')
+      .replace(/很(?:生气|尴尬|紧张|难过|害怕|高兴)(?:地)?/g, '')
+      .replace(/[，,:：。！？!?]+$/g, '')
       .trim();
   }
   if (emotion) return emotionActions[emotion];

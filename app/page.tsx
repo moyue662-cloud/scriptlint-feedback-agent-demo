@@ -59,7 +59,7 @@ const sampleScript = `客厅，夜晚。
 父亲很尴尬，试图隐瞒：“这不重要。”
 林晓不相信父亲的解释，继续追问。父亲沉默。`;
 
-const AI_REQUEST_TIMEOUT_MS = 26000;
+const AI_REQUEST_TIMEOUT_MS = 34000;
 const PIPELINE_LOOP_LIMIT = 3;
 
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';

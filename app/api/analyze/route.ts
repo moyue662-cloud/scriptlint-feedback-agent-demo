@@ -5,8 +5,8 @@ import { sceneContinuityContext } from '@/lib/scene-state';
 export const runtime = 'edge';
 
 const MODEL = 'deepseek-v4-flash';
-const API_URL = 'https://api.deepseek.com/responses';
-const MODEL_TIMEOUT_MS = 22000;
+const API_URL = 'https://api.deepseek.com/chat/completions';
+const MODEL_TIMEOUT_MS = 30000;
 const issueTypes = [
   'missing_character', 'abstract_emotion', 'missing_response', 'weak_action',
   'knowledge_risk', 'emotion_jump', 'continuity', 'dialogue_logic',
@@ -70,7 +70,7 @@ const analysisSchema = {
   required: ['characters', 'beats', 'issues', 'score', 'executionPrompt'],
 } as const;
 
-const instructions = `你是短剧交互编译器，不是自由改写作者。你的任务是把中文原始剧本转换为可拍摄、可验证、可供视频模型执行的交互节拍。
+const instructions = `你是短剧交互编译器，不是自由改写作者。你的任务是把中文原始剧本转换为可拍摄、可验证、可供视频模型执行的交互节拍，并只输出 JSON 对象。
 
 必须遵守：
 1. 不改变核心事实、人物关系、事件顺序和结局倾向。
@@ -82,9 +82,21 @@ const instructions = `你是短剧交互编译器，不是自由改写作者。�
 7. issues 只记录具体、可定位的问题；targetId 指向节拍编号或 SCRIPT。
 8. executionPrompt 要完整列出修正后的节拍，并约束后续分镜模型保持人物、道具、空间和因果连续。
 9. 如果提供“上一场状态”，必须默认继承人物情绪、知情信息、道具、空间与时间；若新剧本开场与其冲突且没有明确变化过程，添加 hard continuity 问题并给出补桥建议。
-10. 仅输出符合 JSON Schema 的数据；禁止 Markdown 代码块、注释、未加双引号的键和尾随逗号。`;
+10. 仅输出符合下方 JSON Schema 的数据；禁止 Markdown 代码块、注释、未加双引号的键和尾随逗号。
+
+JSON Schema：
+${JSON.stringify(analysisSchema)}`;
 
 function getOutputText(payload: Record<string, unknown>) {
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  const firstChoice = choices[0];
+  if (firstChoice && typeof firstChoice === 'object') {
+    const message = (firstChoice as { message?: unknown }).message;
+    if (message && typeof message === 'object') {
+      const content = (message as { content?: unknown }).content;
+      if (typeof content === 'string') return content;
+    }
+  }
   if (typeof payload.output_text === 'string') return payload.output_text;
   const output = Array.isArray(payload.output) ? payload.output : [];
   for (const item of output) {
@@ -188,18 +200,15 @@ export async function POST(request: Request) {
         },
         body: JSON.stringify({
           model: MODEL,
-          instructions,
-          input,
-          reasoning: { effort: 'low' },
-          text: {
-            format: {
-              type: 'json_schema',
-              name: 'short_drama_interaction_analysis',
-              schema: analysisSchema,
-            },
-          },
-          max_output_tokens: 7000,
-          store: false,
+          messages: [
+            { role: 'system', content: instructions },
+            { role: 'user', content: input },
+          ],
+          thinking: { type: 'disabled' },
+          response_format: { type: 'json_object' },
+          temperature: 0.2,
+          max_tokens: 4500,
+          stream: false,
         }),
         signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
       });

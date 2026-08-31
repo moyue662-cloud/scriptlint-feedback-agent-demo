@@ -11,8 +11,8 @@ import {
 export const runtime = 'edge';
 
 const MODEL = 'deepseek-v4-flash';
-const API_URL = 'https://api.deepseek.com/responses';
-const MODEL_TIMEOUT_MS = 26000;
+const API_URL = 'https://api.deepseek.com/chat/completions';
+const MODEL_TIMEOUT_MS = 36000;
 const stateProperties = {
   characterPositions: { type: 'string' },
   gazeDirection: { type: 'string' },
@@ -75,7 +75,7 @@ const storyboardSchema = {
   required: ['shots', 'issues', 'modelPrompt'],
 } as const;
 
-const instructions = `你是短剧分镜编译器。输入包含原始剧本和已经验证的交互节拍。你要生成能直接交给视频模型执行的镜头表，并建立可被程序比较的连续性状态。
+const instructions = `你是短剧分镜编译器。输入包含原始剧本和已经验证的交互节拍。你要生成能直接交给视频模型执行的镜头表，并建立可被程序比较的连续性状态，只输出 JSON 对象。
 
 规则：
 1. 每个交互节拍至少对应一个镜头；重要的“行动—反应”可以拆为两个镜头。
@@ -86,7 +86,10 @@ const instructions = `你是短剧分镜编译器。输入包含原始剧本和�
 6. videoPrompt 要描述主体、单一动作、构图、光线和连续性约束，不得改变人物身份、服装、道具或剧情事实。
 7. issues 只记录仍存在的具体问题；没有问题可以返回空数组。
 8. modelPrompt 是将全部镜头发送给后续视频生成模型的总指令，强调镜头顺序和状态锁定。
-9. 仅输出合法 JSON；禁止 Markdown、注释、未加双引号的键和尾随逗号。`;
+9. 仅输出符合下方 JSON Schema 的合法 JSON；禁止 Markdown、注释、未加双引号的键和尾随逗号。
+
+JSON Schema：
+${JSON.stringify(storyboardSchema)}`;
 
 const repairInstructions = `${instructions}
 
@@ -98,6 +101,15 @@ const repairInstructions = `${instructions}
 5. 若一个问题无法在授权范围内安全解决，保留原镜头并继续在 issues 中说明，不得扩大修改范围。`;
 
 function getOutputText(payload: Record<string, unknown>) {
+  const choices = Array.isArray(payload.choices) ? payload.choices : [];
+  const firstChoice = choices[0];
+  if (firstChoice && typeof firstChoice === 'object') {
+    const message = (firstChoice as { message?: unknown }).message;
+    if (message && typeof message === 'object') {
+      const content = (message as { content?: unknown }).content;
+      if (typeof content === 'string') return content;
+    }
+  }
   const output = Array.isArray(payload.output) ? payload.output : [];
   for (const item of output) {
     if (!item || typeof item !== 'object') continue;
@@ -166,11 +178,15 @@ export async function POST(request: Request) {
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: MODEL,
-          instructions: repairMode ? repairInstructions : instructions,
-          input,
-          reasoning: { effort: 'none' },
-          text: { format: { type: 'json_schema', name: 'short_drama_storyboard', schema: storyboardSchema } },
-          max_output_tokens: 9000,
+          messages: [
+            { role: 'system', content: repairMode ? repairInstructions : instructions },
+            { role: 'user', content: input },
+          ],
+          thinking: { type: 'disabled' },
+          response_format: { type: 'json_object' },
+          temperature: 0.2,
+          max_tokens: 7000,
+          stream: false,
         }),
         signal: AbortSignal.timeout(MODEL_TIMEOUT_MS),
       });
