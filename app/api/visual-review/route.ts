@@ -10,7 +10,7 @@ const issueTypes: VisualIssueType[] = ['identity', 'wardrobe', 'prop', 'position
 
 const instructions = `你是短剧成片连续性检查器。你只能根据用户提供的画面帧和“应当呈现的镜头状态”判断，不得猜测画面外事实，不得把拍摄风格偏好当成错误。只输出 JSON 对象，不要 Markdown。
 
-检查：人物身份/外观、服装、关键道具、站位与视线、空间、时间连续性，以及画面是否表达了镜头要求。只有影响剧情理解或连续性的身份、主要道具、站位、空间错误才标记 hard；轻微构图或表演偏差标记 soft。
+检查：人物身份/外观、服装、关键道具、站位与视线、空间、时间连续性，以及画面是否表达了镜头要求。多帧时按 frameIndex 顺序判断状态是否发生了有依据的变化；只有影响剧情理解或连续性的身份、主要道具、站位、空间错误才标记 hard；轻微构图或表演偏差标记 soft。
 每条问题必须指向真实存在的 frameIndex（从0开始）和可选的 shotId；如果无法确认就不要创建问题。不要杜撰未出现在画面中的人物、道具或变化。
 
 输出格式：{"overview":"简短总结","score":0到100的整数,"framesAnalyzed":帧数,"issues":[{"id":"V01","severity":"hard或soft","type":"identity|wardrobe|prop|position|gaze|space|time|shot","frameIndex":0,"shotId":"S01或null","title":"问题标题","detail":"只描述可见证据","suggestion":"最小修复建议"}]}`;

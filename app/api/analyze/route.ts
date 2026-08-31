@@ -1,4 +1,4 @@
-import type { AnalysisResult } from '@/lib/script-engine';
+import { analyzeScript, type AnalysisResult } from '@/lib/script-engine';
 import { getEpisodeSummary, getLatestScene, getPreviousScene } from '@/lib/scene-db';
 import { sceneContinuityContext } from '@/lib/scene-state';
 
@@ -138,6 +138,31 @@ function parseStructuredOutput(outputText: string) {
   }
 }
 
+function enforceBeatCompleteness(result: Omit<AnalysisResult, 'analyzedAt'>, script: string) {
+  const localBeatCount = analyzeScript(script).beats.length;
+  const minimumBeatCount = Math.max(1, Math.ceil(localBeatCount * 0.75));
+  if (result.beats.length >= minimumBeatCount) return { result, minimumBeatCount, blocked: false };
+  const gateIssue = {
+    id: 'MODEL-BEAT-GATE',
+    severity: 'hard' as const,
+    type: 'dialogue_logic' as const,
+    targetId: 'SCRIPT',
+    title: '模型节拍覆盖不足',
+    detail: `模型只返回 ${result.beats.length} 个节拍，但原文结构至少需要 ${minimumBeatCount} 个节拍；前后动作或台词可能被合并，无法安全交给分镜模型。`,
+    suggestion: '重新运行编译，或把每个“动作/台词/对方反应”拆成独立句子后再分析。',
+    resolved: false,
+  };
+  return {
+    result: {
+      ...result,
+      issues: [...result.issues.filter((issue) => issue.id !== gateIssue.id), gateIssue],
+      score: Math.min(Number(result.score) || 0, 64),
+    },
+    minimumBeatCount,
+    blocked: true,
+  };
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json() as {
@@ -228,13 +253,16 @@ export async function POST(request: Request) {
 
     const outputText = getOutputText(payload);
     if (!outputText) return Response.json({ error: '模型没有返回可用的结构化结果。' }, { status: 502 });
-    const result = parseStructuredOutput(outputText);
+    const parsedResult = parseStructuredOutput(outputText);
+    const beatCheck = enforceBeatCompleteness(parsedResult, script);
+    const result = beatCheck.result;
 
     return Response.json({
       result: { ...result, analyzedAt: new Date().toISOString() },
       meta: {
         source: 'ai', provider: 'deepseek', model: MODEL,
         mode: isRepair ? 'repair' : 'analyze',
+        beatGate: { minimum: beatCheck.minimumBeatCount, actual: result.beats.length, blocked: beatCheck.blocked },
         previousSceneNumber: previousScene?.sceneOrder ?? null,
         previousEpisodeNumber: previousScene?.episodeNumber ?? null,
       },

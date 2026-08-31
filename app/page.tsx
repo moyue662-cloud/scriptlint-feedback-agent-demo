@@ -82,7 +82,7 @@ function readFileAsDataUrl(file: File) {
   });
 }
 
-function extractVideoFrame(file: File) {
+function extractVideoFrame(file: File, ratio: number) {
   return new Promise<string>((resolve, reject) => {
     const url = URL.createObjectURL(file);
     const video = document.createElement('video');
@@ -90,7 +90,8 @@ function extractVideoFrame(file: File) {
     video.muted = true;
     video.playsInline = true;
     video.onloadedmetadata = () => {
-      video.currentTime = Math.min(Math.max(video.duration / 2, 0), 3);
+      const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+      video.currentTime = duration > 0 ? Math.min(Math.max(duration * ratio, 0.05), Math.max(duration - 0.05, 0)) : 0;
     };
     video.onseeked = () => {
       const maxWidth = 1280;
@@ -109,6 +110,16 @@ function extractVideoFrame(file: File) {
     };
     video.src = url;
   });
+}
+
+async function extractVideoFrames(file: File) {
+  const points = [0.12, 0.5, 0.88];
+  const labels = ['开场', '中段', '结尾'];
+  const frames = await Promise.all(points.map(async (ratio, index) => ({
+    dataUrl: await extractVideoFrame(file, ratio),
+    name: `${file.name} · ${labels[index]}`,
+  })));
+  return frames;
 }
 
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
@@ -1127,10 +1138,14 @@ export default function Home() {
     try {
       const uploads: VisualUpload[] = [];
       for (const file of files) {
-        const dataUrl = file.type.startsWith('video/')
-          ? await extractVideoFrame(file)
-          : await readFileAsDataUrl(file);
-        uploads.push({ name: file.name, mimeType: 'image/jpeg', dataUrl });
+        if (file.type.startsWith('video/')) {
+          const frames = await extractVideoFrames(file);
+          frames.forEach((frame) => {
+            if (uploads.length < 6) uploads.push({ name: frame.name, mimeType: 'image/jpeg', dataUrl: frame.dataUrl });
+          });
+        } else if (uploads.length < 6) {
+          uploads.push({ name: file.name, mimeType: file.type || 'image/jpeg', dataUrl: await readFileAsDataUrl(file) });
+        }
       }
       setVisualFiles(uploads);
       setVisualReview(null);
@@ -1948,7 +1963,7 @@ export default function Home() {
                         <table className="w-full min-w-[620px] text-left text-xs"><thead className="bg-muted/50 text-muted-foreground"><tr><th className="px-3 py-2 font-medium">评测对象</th><th className="px-3 py-2 font-medium">通过率</th><th className="px-3 py-2 font-medium">问题召回率</th><th className="px-3 py-2 font-medium">干净样例误报</th><th className="px-3 py-2 font-medium">平均分</th></tr></thead><tbody><tr className="border-t border-border"><td className="px-3 py-2 font-semibold">规则基线 · rule-engine</td><td className="px-3 py-2">{qualityEvaluation.baseline.passRate}%</td><td className="px-3 py-2">{qualityEvaluation.baseline.issueRecall}%</td><td className="px-3 py-2">{qualityEvaluation.baseline.falsePositiveRate}%</td><td className="px-3 py-2">{qualityEvaluation.baseline.averageScore}</td></tr>{qualityEvaluation.deepseek && <tr className="border-t border-border"><td className="px-3 py-2 font-semibold">DeepSeek · deepseek-v4-flash</td><td className="px-3 py-2">{qualityEvaluation.deepseek.passRate}%</td><td className="px-3 py-2">{qualityEvaluation.deepseek.issueRecall}%</td><td className="px-3 py-2">{qualityEvaluation.deepseek.falsePositiveRate}%</td><td className="px-3 py-2">{qualityEvaluation.deepseek.averageScore}</td></tr>}</tbody></table>
                       </div>
                       {qualityEvaluation.error && <p className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-900">DeepSeek 复测未完成：{qualityEvaluation.error}。规则基线仍可用于本地回归。</p>}
-                      <div className="space-y-2">{qualityEvaluation.baseline.results.map((item) => <div key={item.id} className="flex flex-col gap-1 rounded-lg border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-semibold">{item.title}</p><p className="mt-1 text-[11px] text-muted-foreground">检测到：{item.issueTypes.join('、') || '无问题类型'} · {item.beatCount} 个节拍</p></div><Badge variant="outline" className={item.passed ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-800'}>{item.passed ? '通过' : '需关注'}</Badge></div>)}</div>
+                      <div className="space-y-2">{qualityEvaluation.baseline.results.map((item) => { const modelItem = qualityEvaluation.deepseek?.results.find((candidate) => candidate.id === item.id); return <div key={item.id} className="flex flex-col gap-2 rounded-lg border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-semibold">{item.title}</p><p className="mt-1 text-[11px] text-muted-foreground">规则：{item.issueTypes.join('、') || '无问题类型'} · {item.beatCount} 个节拍{modelItem ? ` · DeepSeek：${modelItem.issueTypes.join('、') || '无问题类型'} · ${modelItem.beatCount} 个节拍` : ''}</p></div><div className="flex items-center gap-2"><Badge variant="outline" className={item.passed ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-800'}>{item.passed ? '规则通过' : '规则需关注'}</Badge>{modelItem && <Badge variant="outline" className={modelItem.passed ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-rose-200 bg-rose-50 text-rose-800'}>{modelItem.passed ? '模型通过' : '模型需关注'}</Badge>}</div></div>; })}</div>
                     </div>
                   )}
                 </CardContent>
@@ -1960,7 +1975,7 @@ export default function Home() {
                     <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-start">
                       <div className="min-w-0">
                         <div className="flex items-center gap-2"><ImagePlus className="size-4 text-fuchsia-700" /><p className="text-sm font-semibold text-fuchsia-950">成片画面连续性检查</p><Badge variant="outline" className="border-fuchsia-200 bg-white text-fuchsia-800">第④项</Badge></div>
-                        <p className="mt-1 text-xs leading-5 text-fuchsia-900">上传生成后的图片或视频，视频会在本机抽取一帧；视觉模型只收到代表帧和当前分镜状态，原始媒体不会保存。</p>
+                        <p className="mt-1 text-xs leading-5 text-fuchsia-900">上传生成后的图片或视频，视频会在本机抽取开场、中段、结尾三个关键帧（最多6帧）；视觉模型只收到代表帧和当前分镜状态，原始媒体不会保存。</p>
                       </div>
                       <div className="flex shrink-0 gap-2"><input ref={visualFileInputRef} type="file" accept="image/*,video/*" multiple className="hidden" onChange={(event) => void selectVisualFiles(event)} /><Button variant="outline" onClick={() => visualFileInputRef.current?.click()} disabled={busy}><Upload data-icon="inline-start" />选择图片/视频</Button><Button onClick={() => void runVisualReview()} disabled={busy || !storyboard || visualFiles.length === 0}>{isVisualReviewing ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <ScanSearch data-icon="inline-start" />}{isVisualReviewing ? '检查中…' : '检查成片画面'}</Button></div>
                     </div>
