@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, ArrowDown, ArrowRight, ArrowUp, Check, ChevronRight, Clipboard, Download,
+  AlertTriangle, ArrowDown, ArrowRight, ArrowUp, BrainCircuit, Check, ChevronRight, Clipboard, Download,
   Camera, Clock, Database, FileText, Film, GitBranch, GripVertical, Loader2, Play,
   PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Users,
 } from 'lucide-react';
@@ -19,6 +19,7 @@ import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
 import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
+import type { EpisodeAIReview } from '@/lib/episode-ai-review';
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import {
@@ -53,6 +54,11 @@ const episodeReviewStatusClasses: Record<EpisodeReviewStatus, string> = {
   attention: 'border-amber-200 bg-amber-50 text-amber-800',
   blocked: 'border-rose-200 bg-rose-50 text-rose-800',
 };
+
+const aiReviewCategoryLabels = {
+  causality: '因果链', motivation: '人物动机', conflict: '冲突升级',
+  pacing: '节奏', knowledge: '信息认知', hook: '结尾钩子',
+} as const;
 
 const sampleScript = `客厅，夜晚。
 林晓发现桌上父亲的辞职通知书，很生气地质问父亲：“你什么时候辞职的？”
@@ -100,6 +106,7 @@ export default function Home() {
   const [storyboardLoopCount, setStoryboardLoopCount] = useState(0);
   const [scenes, setScenes] = useState<StoredScene[]>([]);
   const [episodeSummaries, setEpisodeSummaries] = useState<EpisodeSummary[]>([]);
+  const [episodeAIReviews, setEpisodeAIReviews] = useState<EpisodeAIReview[]>([]);
   const [summaryEpisode, setSummaryEpisode] = useState<number | null>(null);
   const [episodeSummaryDrafts, setEpisodeSummaryDrafts] = useState<Record<number, EpisodeSummaryDraft>>({});
   const [sceneTitle, setSceneTitle] = useState('');
@@ -111,6 +118,7 @@ export default function Home() {
   const [isSceneDeleting, setIsSceneDeleting] = useState(false);
   const [pendingDeleteSceneId, setPendingDeleteSceneId] = useState<string | null>(null);
   const [isEpisodeSummarySaving, setIsEpisodeSummarySaving] = useState(false);
+  const [isEpisodeAIReviewing, setIsEpisodeAIReviewing] = useState(false);
   const [draggingSceneId, setDraggingSceneId] = useState<string | null>(null);
   const [dragOverSceneId, setDragOverSceneId] = useState<string | null>(null);
   const [project, setProject] = useState<SceneProject | null>(null);
@@ -147,6 +155,20 @@ export default function Home() {
     } catch {
       // Episode summaries are non-blocking; the scene workflow remains usable if they are unavailable.
     }
+  }
+
+  async function loadEpisodeAIReviews() {
+    try {
+      const response = await fetch('/api/episodes/review');
+      const payload = await response.json() as { reviews?: EpisodeAIReview[] };
+      if (response.ok && payload.reviews) setEpisodeAIReviews(payload.reviews);
+    } catch {
+      // AI reviews are an additional project gate; the per-scene workflow remains usable.
+    }
+  }
+
+  function invalidateEpisodeAIReview(targetEpisode: number) {
+    setEpisodeAIReviews((current) => current.filter((review) => review.episodeNumber !== targetEpisode));
   }
 
   async function loadProject() {
@@ -296,12 +318,40 @@ export default function Home() {
         ...current.filter((summary) => summary.episodeNumber !== savedSummary.episodeNumber),
         savedSummary,
       ].sort((a, b) => a.episodeNumber - b.episodeNumber));
+      invalidateEpisodeAIReview(activeSummaryEpisode);
       await loadProject();
       setNotice(`第 ${activeSummaryEpisode} 集总结已保存。`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : '集数总结保存失败，请稍后重试。');
     } finally {
       setIsEpisodeSummarySaving(false);
+    }
+  }
+
+  async function runEpisodeAIReview() {
+    if (!activeSummaryEpisode || isEpisodeAIReviewing || busy) return;
+    setIsEpisodeAIReviewing(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/episodes/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, episodeNumber: activeSummaryEpisode }),
+        signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS + 5000),
+      });
+      const payload = await response.json() as { review?: EpisodeAIReview; error?: string };
+      if (!response.ok || !payload.review) throw new Error(payload.error || 'AI整集审查失败');
+      const review = payload.review;
+      setEpisodeAIReviews((current) => [
+        ...current.filter((item) => item.episodeNumber !== review.episodeNumber),
+        review,
+      ].sort((a, b) => a.episodeNumber - b.episodeNumber));
+      await loadProject();
+      setNotice(`第 ${activeSummaryEpisode} 集AI深度审查完成。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : 'AI整集审查失败，请稍后重试。');
+    } finally {
+      setIsEpisodeAIReviewing(false);
     }
   }
 
@@ -314,6 +364,7 @@ export default function Home() {
       }
       void loadScenes();
       void loadEpisodeSummaries();
+      void loadEpisodeAIReviews();
       void loadProject();
     });
   }, []);
@@ -321,7 +372,7 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -406,9 +457,21 @@ export default function Home() {
   const activeEpisodeReview = activeSummaryEpisode
     ? episodeReviews.find((review) => review.episodeNumber === activeSummaryEpisode) ?? null
     : null;
-  const projectReady = episodeReviews.length > 0 && episodeReviews.every((review) => review.status === 'ready');
-  const blockedEpisodeCount = episodeReviews.filter((review) => review.status === 'blocked').length;
-  const attentionEpisodeCount = episodeReviews.filter((review) => review.status === 'attention').length;
+  const activeEpisodeAIReview = activeSummaryEpisode
+    ? episodeAIReviews.find((review) => review.episodeNumber === activeSummaryEpisode) ?? null
+    : null;
+  const projectReady = episodeReviews.length > 0
+    && episodeReviews.every((review) => review.status === 'ready')
+    && episodeOptions.every((currentEpisodeNumber) => episodeAIReviews.some((review) => review.episodeNumber === currentEpisodeNumber && review.status === 'ready'));
+  const blockedEpisodeCount = episodeOptions.filter((currentEpisodeNumber) => (
+    episodeReviews.find((review) => review.episodeNumber === currentEpisodeNumber)?.status === 'blocked'
+    || episodeAIReviews.find((review) => review.episodeNumber === currentEpisodeNumber)?.status === 'blocked'
+  )).length;
+  const attentionEpisodeCount = episodeOptions.filter((currentEpisodeNumber) => {
+    const ruleStatus = episodeReviews.find((review) => review.episodeNumber === currentEpisodeNumber)?.status;
+    const aiStatus = episodeAIReviews.find((review) => review.episodeNumber === currentEpisodeNumber)?.status;
+    return ruleStatus !== 'blocked' && aiStatus !== 'blocked' && (ruleStatus === 'attention' || aiStatus !== 'ready');
+  }).length;
   const activeSavedScene = useMemo(
     () => loadedSceneId
       ? scenes.find((scene) => scene.id === loadedSceneId) ?? null
@@ -706,6 +769,7 @@ export default function Home() {
         error?: string;
       };
       if (!response.ok || !payload.saved) throw new Error(payload.error || '场次状态保存失败');
+      invalidateEpisodeAIReview(payload.saved.episodeNumber);
       await Promise.all([loadScenes(), loadProject()]);
       setLoadedSceneId(payload.saved.id);
       setNotice(`第 ${payload.saved.episodeNumber} 集第 ${payload.saved.episodeSceneNumber ?? payload.saved.sceneOrder} 场状态${payload.saved.updated ? '已更新' : '已保存'}，编译下一场时会自动继承。`);
@@ -746,6 +810,8 @@ export default function Home() {
       const payload = await response.json() as { moved?: boolean; error?: string };
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
+        const movedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
+        if (movedEpisode) invalidateEpisodeAIReview(movedEpisode);
         await Promise.all([loadScenes(), loadProject()]);
         setNotice('场次顺序已调整，时间线和下一场继承关系已更新。');
       } else {
@@ -768,6 +834,7 @@ export default function Home() {
       const payload = await response.json() as { scenes?: StoredScene[]; error?: string };
       if (!response.ok || !payload.scenes) throw new Error(payload.error || '场次删除失败');
       setScenes(payload.scenes);
+      invalidateEpisodeAIReview(scene.episodeNumber);
       if (loadedSceneId === scene.id) setLoadedSceneId(null);
       setPendingDeleteSceneId(null);
       await loadProject();
@@ -791,6 +858,8 @@ export default function Home() {
       const payload = await response.json() as { moved?: boolean; error?: string };
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
+        const movedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
+        if (movedEpisode) invalidateEpisodeAIReview(movedEpisode);
         await Promise.all([loadScenes(), loadProject()]);
         setNotice('场次顺序已调整，时间线和下一场继承关系已更新。');
       }
@@ -817,6 +886,7 @@ export default function Home() {
       sourceScript: script, analysis: result, storyboard, sceneHistory: scenes,
       episodeSummaries,
       episodeReviews,
+      episodeAIReviews,
       humanReview: { approved: allShotsReviewed, reviewedShotIds, reviewedAt: allShotsReviewed ? new Date().toISOString() : null },
       videoDeliveryPackage: canDeliver ? deliveryPackage : null,
       videoDeliveryValidation: deliveryValidation,
@@ -841,6 +911,8 @@ export default function Home() {
       });
       const payload = await response.json() as { tracking?: StoredScene['deliveryTracking']; error?: string };
       if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
+      const changedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
+      if (changedEpisode) invalidateEpisodeAIReview(changedEpisode);
       await Promise.all([loadScenes(), loadProject()]);
       setNotice('制作进度已保存，刷新页面后仍可继续。');
     }).catch((error) => {
@@ -1336,6 +1408,42 @@ export default function Home() {
                       ) : (
                         <div className="mt-4 flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800"><Check className="size-4" />本集结构规则全部通过，可以进入最终人工审美确认。</div>
                       )}
+                      <div className="mt-4 rounded-xl border border-violet-200 bg-violet-50/70 p-4">
+                        <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <BrainCircuit className="size-4 text-violet-700" />
+                              <p className="text-sm font-semibold text-violet-950">AI整集深度审查</p>
+                              {activeEpisodeAIReview && <Badge variant="outline" className={episodeReviewStatusClasses[activeEpisodeAIReview.status]}>{episodeReviewStatusLabels[activeEpisodeAIReview.status]}</Badge>}
+                            </div>
+                            <p className="mt-1 text-xs leading-5 text-violet-800">检查因果链、人物动机、冲突升级、信息认知、节奏和结尾钩子；结果会随场次或总结修改自动失效。</p>
+                          </div>
+                          <Button onClick={() => void runEpisodeAIReview()} disabled={busy || !activeEpisodeSummary?.objective.trim() || !activeEpisodeSummary?.conflict.trim()}>
+                            {isEpisodeAIReviewing ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <BrainCircuit data-icon="inline-start" />}
+                            {isEpisodeAIReviewing ? '审查中…' : activeEpisodeAIReview ? '重新深度审查' : 'AI深度审查本集'}
+                          </Button>
+                        </div>
+                        {!activeEpisodeSummary?.objective.trim() || !activeEpisodeSummary?.conflict.trim() ? (
+                          <p className="mt-3 text-xs text-amber-800">先保存本集戏剧目标和核心冲突，AI才能判断场次是否真正推进。</p>
+                        ) : activeEpisodeAIReview ? (
+                          <div className="mt-4 space-y-3">
+                            <div className="grid gap-3 lg:grid-cols-[110px_1fr]">
+                              <div className="rounded-lg border border-violet-100 bg-white/80 p-3 text-center"><p className="text-[11px] text-violet-700">AI结构分</p><p className="text-2xl font-semibold text-violet-950">{activeEpisodeAIReview.score}<span className="text-xs font-normal">/100</span></p></div>
+                              <div className="rounded-lg border border-violet-100 bg-white/80 p-3 text-xs leading-5 text-slate-700"><p><span className="font-semibold text-slate-950">整体判断：</span>{activeEpisodeAIReview.overview || '未提供'}</p><p className="mt-1"><span className="font-semibold text-slate-950">结尾钩子：</span>{activeEpisodeAIReview.hookAssessment || '未提供'}</p></div>
+                            </div>
+                            {activeEpisodeAIReview.strengths.length > 0 && <p className="text-xs leading-5 text-emerald-800"><span className="font-semibold">有效部分：</span>{activeEpisodeAIReview.strengths.join('；')}</p>}
+                            {activeEpisodeAIReview.issues.length > 0 ? activeEpisodeAIReview.issues.map((issue) => (
+                              <div key={issue.id} className="rounded-lg border border-violet-100 bg-white/85 p-3">
+                                <div className="flex flex-wrap items-center gap-2"><Badge variant="outline" className={issue.severity === 'hard' ? 'border-rose-200 bg-rose-50 text-rose-800' : 'border-amber-200 bg-amber-50 text-amber-800'}>{issue.severity === 'hard' ? '结构阻断' : '建议完善'}</Badge><Badge variant="outline">{aiReviewCategoryLabels[issue.category]}</Badge><p className="text-xs font-semibold text-slate-950">{issue.title}</p></div>
+                                <p className="mt-1 text-xs leading-5 text-slate-700">{issue.detail}</p>
+                                <p className="mt-1 text-xs leading-5 text-violet-800"><span className="font-semibold">限制范围修复：</span>{issue.suggestion}</p>
+                              </div>
+                            )) : <div className="flex items-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-800"><Check className="size-4" />AI深度结构审查通过。</div>}
+                          </div>
+                        ) : (
+                          <p className="mt-3 text-xs text-violet-800">固定规则通过后运行本项；没有最新AI审查结果时，整部项目不能终审。</p>
+                        )}
+                      </div>
                     </div>
                   )}
 
@@ -1368,7 +1476,7 @@ export default function Home() {
                             <span className={`grid size-9 place-items-center rounded-xl ${project?.approvedAt && projectReady ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}><PackageCheck className="size-4" /></span>
                             <div>
                               <p className="text-sm font-semibold text-slate-950">项目最终交付门禁</p>
-                              <p className="mt-0.5 text-xs text-slate-700">全部集数通过结构规则和镜头验收后，由人完成最后一次整部项目确认。</p>
+                              <p className="mt-0.5 text-xs text-slate-700">全部集数通过固定规则、AI深度审查和镜头验收后，由人完成最后一次整部项目确认。</p>
                             </div>
                             <Badge variant="outline" className={project?.approvedAt && projectReady ? 'border-emerald-200 bg-white text-emerald-800' : projectReady ? 'border-sky-200 bg-white text-sky-800' : 'border-amber-200 bg-white text-amber-800'}>
                               {project?.approvedAt && projectReady ? '最终执行包就绪' : projectReady ? '等待人工终审' : '门禁未通过'}
@@ -1381,7 +1489,7 @@ export default function Home() {
                             <div className="rounded-lg bg-white/80 p-3 text-xs text-emerald-700"><p className="text-lg font-semibold tabular-nums">{sceneTimeline.acceptedShots}/{sceneTimeline.totalShots}</p><p>镜头已验收</p></div>
                           </div>
                           {project?.approvedAt && <p className="mt-3 text-[11px] text-emerald-800">人工终审时间：{new Date(project.approvedAt).toLocaleString('zh-CN')}。任何场次、总结、顺序或制作进度变更都会自动撤销终审。</p>}
-                          {!projectReady && <p className="mt-3 text-[11px] text-amber-800">先处理上方各集的“必须修复”和“建议完善”项目，并完成全部镜头验收。</p>}
+                          {!projectReady && <p className="mt-3 text-[11px] text-amber-800">先处理各集的固定规则与AI深度审查问题，并完成全部镜头验收。任何内容变化后都需要重新运行AI整集审查。</p>}
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-2">
                           <Button variant="outline" onClick={() => void exportProjectPackage()} disabled={busy}>

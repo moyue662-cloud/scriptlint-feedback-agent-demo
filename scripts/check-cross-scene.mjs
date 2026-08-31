@@ -5,9 +5,11 @@ import { runnerImport } from 'vite';
 const loadOptions = { resolve: { alias: { '@': process.cwd() } } };
 const { module: episodeModule } = await runnerImport(path.resolve('lib/episode-review.ts'), loadOptions);
 const { module: stateModule } = await runnerImport(path.resolve('lib/scene-state.ts'), loadOptions);
+const { module: aiReviewModule } = await runnerImport(path.resolve('lib/episode-ai-review.ts'), loadOptions);
 
 const { buildEpisodeReview } = episodeModule;
 const { buildSceneSnapshot } = stateModule;
+const { buildEpisodeSourceHash } = aiReviewModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -76,5 +78,17 @@ const { buildSceneSnapshot } = stateModule;
   assert.ok(lin.knownFacts.includes('父亲已经辞职'));
   assert.ok(lin.knownFacts.includes('父亲仍然沉默'));
   assert.ok(merged.characters.some((item) => item.name === '父亲'));
+
+  const detailScenes = [
+    { ...first, analysis, storyboard },
+    { ...explained, analysis: { ...analysis, analyzedAt: 'later' }, storyboard },
+  ];
+  const originalHash = await buildEpisodeSourceHash(1, detailScenes, summary);
+  const changedSummaryHash = await buildEpisodeSourceHash(1, detailScenes, { ...summary, conflict: '冲突升级为父亲准备离家' });
+  const reorderedHash = await buildEpisodeSourceHash(1, [
+    { ...detailScenes[0], sceneOrder: 2 }, { ...detailScenes[1], sceneOrder: 1 },
+  ], summary);
+  assert.notEqual(originalHash, changedSummaryHash);
+  assert.notEqual(originalHash, reorderedHash);
 
 console.log('cross-scene regression checks passed');

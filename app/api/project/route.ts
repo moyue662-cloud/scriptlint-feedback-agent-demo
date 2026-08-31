@@ -1,6 +1,7 @@
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
+import { buildEpisodeSourceHash } from '@/lib/episode-ai-review';
 import { buildEpisodeReview } from '@/lib/episode-review';
-import { getProject, listEpisodeSummaries, listScenes, setProjectApproval, updateProjectName } from '@/lib/scene-db';
+import { getProject, listEpisodeAIReviews, listEpisodeSummaries, listSceneDetails, setProjectApproval, updateProjectName } from '@/lib/scene-db';
 
 export const runtime = 'edge';
 
@@ -20,9 +21,10 @@ export async function PATCH(request: Request) {
     const body = await request.json() as { name?: string; approved?: boolean };
     if (typeof body.approved === 'boolean') {
       if (body.approved) {
-        const [scenes, summaries] = await Promise.all([
-          listScenes(DEFAULT_PROJECT_ID, 500),
+        const [scenes, summaries, aiReviews] = await Promise.all([
+          listSceneDetails(DEFAULT_PROJECT_ID, 500),
           listEpisodeSummaries(DEFAULT_PROJECT_ID),
+          listEpisodeAIReviews(DEFAULT_PROJECT_ID),
         ]);
         if (scenes.length === 0) return Response.json({ error: '至少保存一个场次后才能完成整部项目终审。' }, { status: 409 });
         const episodeNumbers = Array.from(new Set([
@@ -39,6 +41,18 @@ export async function PATCH(request: Request) {
           return Response.json({
             error: `还有 ${incompleteReviews.length} 集未通过结构与制作门禁。`,
             reviews: incompleteReviews,
+          }, { status: 409 });
+        }
+        const aiIncomplete = [];
+        for (const episodeNumber of episodeNumbers) {
+          const summary = summaries.find((item) => item.episodeNumber === episodeNumber) ?? null;
+          const sourceHash = await buildEpisodeSourceHash(episodeNumber, scenes, summary);
+          const aiReview = aiReviews.find((review) => review.episodeNumber === episodeNumber && review.sourceHash === sourceHash);
+          if (!aiReview || aiReview.status !== 'ready') aiIncomplete.push(episodeNumber);
+        }
+        if (aiIncomplete.length > 0) {
+          return Response.json({
+            error: `第 ${aiIncomplete.join('、')} 集尚未通过最新的AI深度结构审查。`,
           }, { status: 409 });
         }
       }

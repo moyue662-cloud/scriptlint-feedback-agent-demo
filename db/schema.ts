@@ -17,6 +17,15 @@ export const createEpisodeSummariesTableSql = `CREATE TABLE IF NOT EXISTS episod
   PRIMARY KEY (project_id, episode_number)
 )`;
 
+export const createEpisodeAiReviewsTableSql = `CREATE TABLE IF NOT EXISTS episode_ai_reviews (
+  project_id TEXT NOT NULL DEFAULT 'default',
+  episode_number INTEGER NOT NULL,
+  source_hash TEXT NOT NULL,
+  review_json TEXT NOT NULL,
+  reviewed_at TEXT NOT NULL,
+  PRIMARY KEY (project_id, episode_number)
+)`;
+
 export const createSceneStatesTableSql = `CREATE TABLE IF NOT EXISTS scene_states (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL DEFAULT 'default',

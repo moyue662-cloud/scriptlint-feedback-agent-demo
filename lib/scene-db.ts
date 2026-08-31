@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers';
 
-import { createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql } from '@/db/schema';
+import { createEpisodeAiReviewsTableSql, createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql } from '@/db/schema';
+import type { EpisodeAIReview } from '@/lib/episode-ai-review';
 import { buildSceneProductionSummary, DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type {
   DeliveryShotStatus, DeliveryTrackingState, EpisodeSummary, SceneProject,
@@ -42,6 +43,14 @@ interface EpisodeSummaryRow {
   updated_at: string;
 }
 
+interface EpisodeAIReviewRow {
+  project_id: string;
+  episode_number: number;
+  source_hash: string;
+  review_json: string;
+  reviewed_at: string;
+}
+
 function database() {
   return (env as unknown as { DB: D1Database }).DB;
 }
@@ -61,6 +70,7 @@ async function ensureSchema() {
       }
     }
     await db.prepare(createEpisodeSummariesTableSql).run();
+    await db.prepare(createEpisodeAiReviewsTableSql).run();
     await db.prepare(createSceneStatesTableSql).run();
     const columns = await db.prepare('PRAGMA table_info(scene_states)').all<{ name: string }>();
     if (!columns.results.some((column) => column.name === 'delivery_tracking_json')) {
@@ -121,6 +131,17 @@ function toEpisodeSummary(row: EpisodeSummaryRow): EpisodeSummary {
     conflict: row.conflict || '',
     notes: row.notes || '',
     updatedAt: row.updated_at,
+  };
+}
+
+function toEpisodeAIReview(row: EpisodeAIReviewRow): EpisodeAIReview {
+  const review = JSON.parse(row.review_json) as EpisodeAIReview;
+  return {
+    ...review,
+    projectId: row.project_id || DEFAULT_PROJECT_ID,
+    episodeNumber: Math.max(1, Number(row.episode_number) || 1),
+    sourceHash: row.source_hash,
+    reviewedAt: row.reviewed_at,
   };
 }
 
@@ -221,6 +242,29 @@ export async function getEpisodeSummary(episodeNumber: number, projectId = DEFAU
      FROM episode_summaries WHERE project_id = ? AND episode_number = ?`,
   ).bind(projectId, normalizedEpisodeNumber).first<EpisodeSummaryRow>();
   return row ? toEpisodeSummary(row) : null;
+}
+
+export async function listEpisodeAIReviews(projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const result = await database().prepare(
+    `SELECT project_id, episode_number, source_hash, review_json, reviewed_at
+     FROM episode_ai_reviews WHERE project_id = ? ORDER BY episode_number ASC`,
+  ).bind(projectId).all<EpisodeAIReviewRow>();
+  return result.results.map(toEpisodeAIReview);
+}
+
+export async function upsertEpisodeAIReview(review: EpisodeAIReview) {
+  await ensureSchema();
+  await database().prepare(
+    `INSERT INTO episode_ai_reviews (project_id, episode_number, source_hash, review_json, reviewed_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(project_id, episode_number) DO UPDATE SET
+       source_hash = excluded.source_hash, review_json = excluded.review_json, reviewed_at = excluded.reviewed_at`,
+  ).bind(
+    review.projectId, review.episodeNumber, review.sourceHash, JSON.stringify(review), review.reviewedAt,
+  ).run();
+  await invalidateProjectApproval(review.projectId);
+  return review;
 }
 
 export async function upsertEpisodeSummary(input: {
