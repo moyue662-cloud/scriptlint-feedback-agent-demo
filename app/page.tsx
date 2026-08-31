@@ -515,7 +515,7 @@ export default function Home() {
         const response = await fetch('/api/storyboard', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ script, analysis }),
+          body: JSON.stringify({ script, analysis, projectId: project?.id || DEFAULT_PROJECT_ID, ...(loadedSceneId ? { sceneId: loadedSceneId } : {}) }),
         });
         const payload = await response.json() as { result?: StoryboardResult; error?: string };
         if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
@@ -538,7 +538,8 @@ export default function Home() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               script, analysis, mode: 'repair', current: nextStoryboard,
-              loopCount: storyboardRepairCount + 1,
+              loopCount: storyboardRepairCount + 1, projectId: project?.id || DEFAULT_PROJECT_ID,
+              ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
             }),
           });
           const payload = await response.json() as { result?: StoryboardResult; error?: string };
@@ -640,7 +641,7 @@ export default function Home() {
       const response = await fetch('/api/storyboard', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ script, analysis: result }),
+        body: JSON.stringify({ script, analysis: result, projectId: project?.id || DEFAULT_PROJECT_ID, ...(loadedSceneId ? { sceneId: loadedSceneId } : {}) }),
       });
       const payload = await response.json() as { result?: StoryboardResult; error?: string };
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
@@ -666,7 +667,8 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           script, analysis: result, mode: 'repair', current: storyboard,
-          loopCount: storyboardLoopCount + 1,
+          loopCount: storyboardLoopCount + 1, projectId: project?.id || DEFAULT_PROJECT_ID,
+          ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
         }),
       });
       const payload = await response.json() as { result?: StoryboardResult; error?: string };

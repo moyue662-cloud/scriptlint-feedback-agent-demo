@@ -1,5 +1,5 @@
 import type { AnalysisResult } from '@/lib/script-engine';
-import type { StoryboardResult } from '@/lib/storyboard-engine';
+import type { ShotState, StoryboardResult } from '@/lib/storyboard-engine';
 
 export interface CharacterSceneState {
   name: string;
@@ -38,6 +38,24 @@ export interface SceneProductionSummary {
 }
 
 export const DEFAULT_PROJECT_ID = 'default';
+export const VISIBLE_SCENE_TRANSITION_PATTERN = /转场|跳切|切至|切换|来到|回到|走进|离开|外景|内景|与此同时|后来|翌日|次日|第二天|(?:分钟|小时|天|周|月|年)后/;
+
+export function hasExplicitSceneTransition(script: string, reason = '') {
+  const normalizedReason = reason.trim();
+  const explicitReason = VISIBLE_SCENE_TRANSITION_PATTERN.test(normalizedReason)
+    || /因.+(?:变化|移动|离开|进入)|明确转场/.test(normalizedReason);
+  return explicitReason || VISIBLE_SCENE_TRANSITION_PATTERN.test(script);
+}
+
+export function sceneSnapshotToShotState(snapshot: SceneSnapshot): ShotState {
+  return {
+    characterPositions: snapshot.characterPositions,
+    gazeDirection: snapshot.gazeDirection,
+    propState: snapshot.propState,
+    spaceState: snapshot.spaceState,
+    timeState: snapshot.timeState,
+  };
+}
 
 export interface SceneProject {
   id: string;
@@ -66,6 +84,8 @@ export interface StoredScene {
   title: string;
   script: string;
   snapshot: SceneSnapshot;
+  openingState: ShotState | null;
+  transitionReason: string;
   deliveryTracking: DeliveryTrackingState;
   summary: SceneProductionSummary;
   createdAt: string;
@@ -108,27 +128,38 @@ export function buildSceneProductionSummary(
   };
 }
 
-export function buildSceneSnapshot(analysis: AnalysisResult, storyboard: StoryboardResult): SceneSnapshot {
+export function buildSceneSnapshot(
+  analysis: AnalysisResult,
+  storyboard: StoryboardResult,
+  inheritedSnapshot: SceneSnapshot | null = null,
+): SceneSnapshot {
   const finalShot = storyboard.shots.at(-1);
-  const characters = analysis.characters.map((name) => {
+  const inheritedCharacters = new Map((inheritedSnapshot?.characters ?? []).map((character) => [character.name, character]));
+  const currentCharacters = analysis.characters.map((name) => {
     const involved = analysis.beats.filter((beat) => beat.actor === name || beat.receiver === name);
     const lastActingBeat = [...involved].reverse().find((beat) => beat.actor === name);
     const lastReceivingBeat = [...involved].reverse().find((beat) => beat.receiver === name);
-    const knownFacts = involved
+    const inherited = inheritedCharacters.get(name);
+    const knownFacts = [...(inherited?.knownFacts ?? []), ...involved
       .flatMap((beat) => [beat.trigger, beat.source])
       .map((fact) => fact.trim())
-      .filter(Boolean)
+      .filter(Boolean)]
       .filter((fact, index, all) => all.indexOf(fact) === index)
       .slice(-8);
 
     return {
       name,
-      emotionalState: lastActingBeat?.stateAfter ?? lastReceivingBeat?.stateAfter ?? '未明确',
-      lastAction: lastActingBeat?.action ?? lastReceivingBeat?.reaction ?? '保持上一状态',
-      lastDialogue: lastActingBeat?.dialogue || lastReceivingBeat?.response || '无台词',
+      emotionalState: lastActingBeat?.stateAfter ?? lastReceivingBeat?.stateAfter ?? inherited?.emotionalState ?? '未明确',
+      lastAction: lastActingBeat?.action ?? lastReceivingBeat?.reaction ?? inherited?.lastAction ?? '保持上一状态',
+      lastDialogue: lastActingBeat?.dialogue || lastReceivingBeat?.response || inherited?.lastDialogue || '无台词',
       knownFacts,
     };
   });
+  const currentNames = new Set(currentCharacters.map((character) => character.name));
+  const characters = [
+    ...currentCharacters,
+    ...(inheritedSnapshot?.characters ?? []).filter((character) => !currentNames.has(character.name)),
+  ];
 
   return {
     characters,

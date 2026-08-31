@@ -1,5 +1,5 @@
 import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '@/lib/scene-state';
-import { deleteScene, getEpisodeSceneNumber, getLatestScene, getSceneById, listScenes, moveScene, moveSceneBefore, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
+import { deleteScene, getEpisodeSceneNumber, getLatestScene, getPreviousScene, getSceneById, listScenes, moveScene, moveSceneBefore, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import { finalizeStoryboard, type StoryboardResult } from '@/lib/storyboard-engine';
 
@@ -118,8 +118,11 @@ export async function POST(request: Request) {
     if (validatedStoryboard.issues.some((issue) => !issue.resolved && issue.severity === 'hard')) {
       return Response.json({ error: '场次仍存在未解决的硬性连续性问题，不能保存。' }, { status: 409 });
     }
-    const snapshot = buildSceneSnapshot(body.analysis, validatedStoryboard);
     const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;
+    const previousScene = body.sceneId?.trim()
+      ? await getPreviousScene(body.sceneId.trim(), projectId)
+      : await getLatestScene(projectId);
+    const snapshot = buildSceneSnapshot(body.analysis, validatedStoryboard, previousScene?.snapshot ?? null);
     const saved = await saveScene({
       sceneId: body.sceneId?.trim() || undefined,
       title: body.title?.trim().slice(0, 80) || '未命名场次',

@@ -153,6 +153,8 @@ function toStoredScene(row: SceneRow): StoredScene {
     title: row.title,
     script: row.script,
     snapshot: JSON.parse(row.snapshot_json) as SceneSnapshot,
+    openingState: storyboard?.shots[0]?.startState ?? null,
+    transitionReason: storyboard?.shots[0]?.continuityReason ?? '',
     deliveryTracking,
     summary: buildSceneProductionSummary(storyboard, deliveryTracking),
     createdAt: row.created_at,

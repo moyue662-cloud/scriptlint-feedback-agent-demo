@@ -1,4 +1,6 @@
 import type { AnalysisResult } from '@/lib/script-engine';
+import { getLatestScene, getPreviousScene } from '@/lib/scene-db';
+import { DEFAULT_PROJECT_ID, hasExplicitSceneTransition, sceneContinuityContext, sceneSnapshotToShotState } from '@/lib/scene-state';
 import {
   addStoryboardRepairHistory,
   buildFallbackStoryboard,
@@ -153,6 +155,8 @@ export async function POST(request: Request) {
       mode?: 'generate' | 'repair';
       current?: StoryboardResult;
       loopCount?: number;
+      projectId?: string;
+      sceneId?: string;
     };
     if (!body.script?.trim() || !body.analysis?.beats?.length) {
       return Response.json({ error: '请先完成剧本交互分析。' }, { status: 400 });
@@ -169,10 +173,22 @@ export async function POST(request: Request) {
     }
     const scope = repairMode && body.current ? getStoryboardRepairScope(body.current) : null;
     const budget = getStoryboardBudget(body.analysis);
+    const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;
+    let previousScene = null;
+    try {
+      previousScene = body.sceneId?.trim()
+        ? await getPreviousScene(body.sceneId.trim(), projectId)
+        : await getLatestScene(projectId);
+    } catch (error) {
+      console.warn('Storyboard previous scene context unavailable', error instanceof Error ? error.message : 'unknown error');
+    }
+    const previousSceneContext = previousScene
+      ? `\n\n上一场结束状态（权威约束）：\n${JSON.stringify(sceneContinuityContext(previousScene))}\n若当前剧本没有明确写出时间、地点或人物移动变化，第一镜头 startState 必须逐字段继承这份状态。若剧本明确转场，必须在第一镜头 continuityReason 中写清变化依据。`
+      : '';
     const budgetContext = `\n\n本场硬预算：最多 ${budget.maxShots} 个镜头、预计总时长最多 ${budget.maxDurationSec} 秒。每个节拍通常使用 1 个镜头，确有必要的行动—反应最多拆为 2 个。不得用重复表情、重复停顿或无信息增量反应填充镜头。`;
     const input = repairMode && body.current && scope
-      ? `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}\n\n当前分镜：\n${JSON.stringify(body.current)}\n\nactiveIssues：\n${JSON.stringify(body.current.issues.filter((issue) => !issue.resolved))}\n\n修复范围：\n${JSON.stringify(scope)}${budgetContext}`
-      : `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}${budgetContext}`;
+      ? `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}\n\n当前分镜：\n${JSON.stringify(body.current)}\n\nactiveIssues：\n${JSON.stringify(body.current.issues.filter((issue) => !issue.resolved))}\n\n修复范围：\n${JSON.stringify(scope)}${previousSceneContext}${budgetContext}`
+      : `原始剧本：\n${body.script}\n\n交互分析：\n${JSON.stringify(body.analysis)}${previousSceneContext}${budgetContext}`;
 
     let parsed: Omit<StoryboardResult, 'generatedAt' | 'totalDurationSec' | 'continuityScore'>;
     let usedFallback = false;
@@ -213,7 +229,21 @@ export async function POST(request: Request) {
     const scoped = repairMode && body.current && scope
       ? enforceStoryboardRepairScope(body.current, parsed, scope)
       : parsed;
-    const finalized = finalizeStoryboard(scoped, body.analysis, scope?.lockedShotIds);
+    const firstShot = scoped.shots[0];
+    const continuityScoped = previousScene && firstShot && !hasExplicitSceneTransition(body.script, firstShot.continuityReason)
+      ? {
+          ...scoped,
+          shots: [
+            {
+              ...firstShot,
+              startState: sceneSnapshotToShotState(previousScene.snapshot),
+              continuityReason: `跨场连续承接“${previousScene.title}”结束状态`,
+            },
+            ...scoped.shots.slice(1),
+          ],
+        }
+      : scoped;
+    const finalized = finalizeStoryboard(continuityScoped, body.analysis, scope?.lockedShotIds);
     const result = repairMode && body.current
       ? addStoryboardRepairHistory(body.current, finalized)
       : finalized;

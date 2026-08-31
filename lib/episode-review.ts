@@ -1,4 +1,4 @@
-import type { EpisodeSummary, StoredScene } from '@/lib/scene-state';
+import { hasExplicitSceneTransition, type EpisodeSummary, type StoredScene } from '@/lib/scene-state';
 
 export type EpisodeReviewSeverity = 'hard' | 'soft';
 export type EpisodeReviewStatus = 'ready' | 'attention' | 'blocked';
@@ -37,13 +37,31 @@ function isMissingState(value: string) {
 
 function progressionSignature(scene: StoredScene) {
   return JSON.stringify({
-    characters: scene.snapshot.characters.map((character) => [character.name, character.emotionalState, character.lastAction]),
+    characters: scene.snapshot.characters.map((character) => [
+      character.name, character.emotionalState, character.lastAction, [...character.knownFacts].sort(),
+    ]),
     positions: scene.snapshot.characterPositions,
     gaze: scene.snapshot.gazeDirection,
     props: scene.snapshot.propState,
     space: scene.snapshot.spaceState,
     time: scene.snapshot.timeState,
   });
+}
+
+function hasExplainedTransition(scene: StoredScene) {
+  return hasExplicitSceneTransition(scene.script, scene.transitionReason);
+}
+
+function describeCrossSceneMismatch(previous: StoredScene, current: StoredScene) {
+  if (!current.openingState) return ['缺少下一场第一镜头的开始状态'];
+  const fields = [
+    ['人物站位', previous.snapshot.characterPositions, current.openingState.characterPositions],
+    ['视线', previous.snapshot.gazeDirection, current.openingState.gazeDirection],
+    ['道具', previous.snapshot.propState, current.openingState.propState],
+    ['空间', previous.snapshot.spaceState, current.openingState.spaceState],
+    ['时间', previous.snapshot.timeState, current.openingState.timeState],
+  ] as const;
+  return fields.filter(([, from, to]) => from.trim() !== to.trim()).map(([label, from, to]) => `${label}“${from}”→“${to}”`);
 }
 
 export function buildEpisodeReview(
@@ -58,6 +76,13 @@ export function buildEpisodeReview(
   const shotCount = episodeScenes.reduce((total, scene) => total + scene.summary.shotCount, 0);
   const acceptedShotCount = episodeScenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0);
   const continuityIssueCount = episodeScenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0);
+  const crossSceneMismatches = episodeScenes.slice(1).flatMap((scene, index) => {
+    const previous = episodeScenes[index];
+    const mismatches = describeCrossSceneMismatch(previous, scene);
+    return mismatches.length > 0 && !hasExplainedTransition(scene)
+      ? [{ previous, scene, mismatches }]
+      : [];
+  });
 
   if (!summary?.title.trim()) {
     issues.push({
@@ -103,6 +128,13 @@ export function buildEpisodeReview(
       suggestion: '逐场修复连续性问题后重新保存场次状态。',
     });
   }
+  crossSceneMismatches.forEach(({ previous, scene, mismatches }, index) => {
+    issues.push({
+      id: `cross-scene-${index + 1}`, severity: 'hard', title: `“${previous.title}”到“${scene.title}”衔接状态突变`,
+      detail: `${mismatches.join('；')}，但下一场剧本或首镜头没有说明可见转场。`,
+      suggestion: '让下一场第一镜头继承上一场结束状态；若确实经过时间或地点变化，请在剧本与首镜头转场理由中明确写出。',
+    });
+  });
 
   const incompleteStateScenes = episodeScenes.filter((scene) => [
     scene.snapshot.characterPositions,
@@ -166,8 +198,10 @@ export function buildEpisodeReview(
       detail: episodeScenes.length > 0 ? `${episodeScenes.length - scenesWithoutShots.length}/${episodeScenes.length} 场已有分镜` : '尚无场次',
     },
     {
-      id: 'continuity', label: '连续性闭合', passed: continuityIssueCount === 0 && incompleteStateScenes.length === 0 && episodeScenes.length > 0,
-      detail: continuityIssueCount === 0 && incompleteStateScenes.length === 0 ? '状态和连续性已闭合' : `${continuityIssueCount} 项待修，${incompleteStateScenes.length} 场状态不完整`,
+      id: 'continuity', label: '连续性闭合', passed: continuityIssueCount === 0 && incompleteStateScenes.length === 0 && crossSceneMismatches.length === 0 && episodeScenes.length > 0,
+      detail: continuityIssueCount === 0 && incompleteStateScenes.length === 0 && crossSceneMismatches.length === 0
+        ? '镜内与跨场状态均已闭合'
+        : `${continuityIssueCount} 项镜内待修，${crossSceneMismatches.length} 处跨场突变，${incompleteStateScenes.length} 场状态不完整`,
     },
   ];
 
