@@ -44,3 +44,23 @@ export const createSceneStatesTableSql = `CREATE TABLE IF NOT EXISTS scene_state
 
 export const createSceneOrderIndexSql = `CREATE INDEX IF NOT EXISTS idx_scene_states_project_order
   ON scene_states(project_id, scene_order, scene_number)`;
+
+export const createSceneVersionsTableSql = `CREATE TABLE IF NOT EXISTS scene_versions (
+  id TEXT PRIMARY KEY,
+  scene_id TEXT NOT NULL,
+  project_id TEXT NOT NULL DEFAULT 'default',
+  version_number INTEGER NOT NULL,
+  episode_number INTEGER NOT NULL DEFAULT 1,
+  title TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  script TEXT NOT NULL,
+  analysis_json TEXT NOT NULL,
+  storyboard_json TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL,
+  delivery_tracking_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  UNIQUE(scene_id, version_number)
+)`;
+
+export const createSceneVersionsIndexSql = `CREATE INDEX IF NOT EXISTS idx_scene_versions_project_scene
+  ON scene_versions(project_id, scene_id, version_number DESC)`;

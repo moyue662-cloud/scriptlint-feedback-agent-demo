@@ -116,6 +116,17 @@ export interface StoredSceneDetail extends StoredScene {
   storyboard: StoryboardResult;
 }
 
+export interface SceneVersionSummary {
+  id: string;
+  sceneId: string;
+  projectId: string;
+  versionNumber: number;
+  episodeNumber: number;
+  title: string;
+  scriptPreview: string;
+  createdAt: string;
+}
+
 export function buildSceneProductionSummary(
   storyboard: StoryboardResult | null,
   deliveryTracking: DeliveryTrackingState,

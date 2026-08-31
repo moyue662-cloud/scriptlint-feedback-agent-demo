@@ -6,10 +6,12 @@ const loadOptions = { resolve: { alias: { '@': process.cwd() } } };
 const { module: episodeModule } = await runnerImport(path.resolve('lib/episode-review.ts'), loadOptions);
 const { module: stateModule } = await runnerImport(path.resolve('lib/scene-state.ts'), loadOptions);
 const { module: aiReviewModule } = await runnerImport(path.resolve('lib/episode-ai-review.ts'), loadOptions);
+const { module: batchImportModule } = await runnerImport(path.resolve('lib/batch-import.ts'), loadOptions);
 
 const { buildEpisodeReview } = episodeModule;
 const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
 const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
+const { splitScriptIntoScenes } = batchImportModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -113,5 +115,11 @@ const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
   assert.equal(passesEpisodeAIReviewGate({ status: 'attention' }), true);
   assert.equal(passesEpisodeAIReviewGate({ status: 'blocked' }), false);
   assert.equal(passesEpisodeAIReviewGate(null), false);
+
+  const imported = splitScriptIntoScenes(`第1场 客厅\n林晓：你什么时候辞职的？\n\n第2场 公司门口\n父亲：这件事我会解释。`);
+  assert.equal(imported.length, 2);
+  assert.equal(imported[0].title, '第1场 客厅');
+  assert.match(imported[1].script, /父亲/);
+  assert.equal(splitScriptIntoScenes('只有一场戏').length, 1);
 
 console.log('cross-scene regression checks passed');

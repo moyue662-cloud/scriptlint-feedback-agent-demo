@@ -20,8 +20,9 @@ import {
 } from '@/lib/script-engine';
 import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
 import { passesEpisodeAIReviewGate, type EpisodeAIReview } from '@/lib/episode-ai-review';
+import { splitScriptIntoScenes, type ImportedSceneDraft } from '@/lib/batch-import';
 import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState } from '@/lib/scene-state';
-import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
+import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, SceneVersionSummary, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import {
   buildFallbackStoryboard, finalizeStoryboard, type ShotState, type StoryboardResult,
 } from '@/lib/storyboard-engine';
@@ -135,6 +136,12 @@ export default function Home() {
   const [deliveryAspectRatio, setDeliveryAspectRatio] = useState<DeliveryAspectRatio>('9:16');
   const [deliveryCopied, setDeliveryCopied] = useState(false);
   const [deliveryShotStatuses, setDeliveryShotStatuses] = useState<Record<string, DeliveryShotStatus>>({});
+  const [batchImportText, setBatchImportText] = useState('');
+  const [batchDrafts, setBatchDrafts] = useState<ImportedSceneDraft[]>([]);
+  const [sceneVersions, setSceneVersions] = useState<Record<string, SceneVersionSummary[]>>({});
+  const [versionHistorySceneId, setVersionHistorySceneId] = useState<string | null>(null);
+  const [isVersionHistoryLoading, setIsVersionHistoryLoading] = useState(false);
+  const [isVersionRestoring, setIsVersionRestoring] = useState(false);
   const deliverySaveQueue = useRef<Promise<void>>(Promise.resolve());
 
   async function loadScenes() {
@@ -184,6 +191,26 @@ export default function Home() {
     }
   }
 
+  function applySceneDetail(detail: StoredSceneDetail) {
+    setScript(detail.script);
+    window.localStorage.setItem('scene-flow-script', detail.script);
+    setResult(detail.analysis);
+    setSource('saved');
+    setLoopCount(0);
+    setStoryboard(detail.storyboard);
+    setStoryboardLoopCount(0);
+    setReviewedShotIds(detail.storyboard.shots.map((shot) => shot.id));
+    setDeliveryShotStatuses(detail.deliveryTracking.statuses);
+    setDeliveryCopied(false);
+    setSceneTitle(detail.title);
+    setEpisodeNumber(detail.episodeNumber);
+    setLoadedSceneId(detail.id);
+    const previous = [...scenes]
+      .filter((item) => item.episodeNumber === detail.episodeNumber && item.sceneOrder < detail.sceneOrder)
+      .sort((a, b) => b.sceneOrder - a.sceneOrder)[0];
+    setPreviousSceneNumber(previous ? episodeSceneNumbers.get(previous.id) ?? previous.sceneOrder : null);
+  }
+
   async function loadSavedScene(scene: StoredScene) {
     if (busy || isSceneLoading) return;
     setIsSceneLoading(true);
@@ -193,19 +220,7 @@ export default function Home() {
       const payload = await response.json() as { scene?: StoredSceneDetail; error?: string };
       if (!response.ok || !payload.scene) throw new Error(payload.error || '场次载入失败');
       const detail = payload.scene;
-      setScript(detail.script);
-      window.localStorage.setItem('scene-flow-script', detail.script);
-      setResult(detail.analysis);
-      setSource('saved');
-      setLoopCount(0);
-      setStoryboard(detail.storyboard);
-      setStoryboardLoopCount(0);
-      setReviewedShotIds(detail.storyboard.shots.map((shot) => shot.id));
-      setDeliveryShotStatuses(detail.deliveryTracking.statuses);
-      setDeliveryCopied(false);
-      setSceneTitle(detail.title);
-      setEpisodeNumber(detail.episodeNumber);
-      setLoadedSceneId(detail.id);
+      applySceneDetail(detail);
       const episodeSceneNumber = episodeSceneNumbers.get(detail.id) ?? detail.sceneOrder;
       const previous = [...scenes]
         .filter((item) => item.episodeNumber === detail.episodeNumber && item.sceneOrder < detail.sceneOrder)
@@ -216,6 +231,66 @@ export default function Home() {
       setNotice(error instanceof Error ? error.message : '场次载入失败，请稍后重试。');
     } finally {
       setIsSceneLoading(false);
+    }
+  }
+
+  function splitBatchImport() {
+    const drafts = splitScriptIntoScenes(batchImportText, episodeNumber);
+    setBatchDrafts(drafts);
+    setNotice(drafts.length > 0 ? `已识别 ${drafts.length} 个场次草稿，请逐场编译并保存。` : '没有识别到可导入的场次内容。');
+  }
+
+  function loadBatchDraft(draft: ImportedSceneDraft) {
+    setEpisodeNumber(draft.episodeNumber);
+    setSceneTitle(draft.title);
+    setScript(draft.script);
+    window.localStorage.setItem('scene-flow-script', draft.script);
+    setResult(analyzeScript(draft.script));
+    setSource('local');
+    setStoryboard(null);
+    setReviewedShotIds([]);
+    setDeliveryShotStatuses({});
+    setLoadedSceneId(null);
+    setNotice(`已载入“${draft.title}”，现在可以运行AI编译或全流程。`);
+  }
+
+  async function loadSceneVersions(sceneId: string) {
+    setVersionHistorySceneId(sceneId);
+    setIsVersionHistoryLoading(true);
+    try {
+      const response = await fetch(`/api/scenes?id=${encodeURIComponent(sceneId)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}&action=versions`);
+      const payload = await response.json() as { versions?: SceneVersionSummary[]; error?: string };
+      if (!response.ok || !payload.versions) throw new Error(payload.error || '版本历史载入失败');
+      const versions = payload.versions;
+      setSceneVersions((current) => ({ ...current, [sceneId]: versions }));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '版本历史载入失败，请稍后重试。');
+    } finally {
+      setIsVersionHistoryLoading(false);
+    }
+  }
+
+  async function restoreVersion(sceneId: string, versionId: string) {
+    if (busy || isVersionRestoring) return;
+    setIsVersionRestoring(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/scenes', {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, versionId, action: 'restore-version' }),
+      });
+      const payload = await response.json() as { restored?: StoredSceneDetail; scenes?: StoredScene[]; error?: string };
+      if (!response.ok || !payload.restored || !payload.scenes) throw new Error(payload.error || '版本恢复失败');
+      setScenes(payload.scenes);
+      applySceneDetail(payload.restored);
+      invalidateEpisodeAIReview(payload.restored.episodeNumber);
+      await loadProject();
+      await loadSceneVersions(sceneId);
+      setNotice(`已恢复第 ${payload.restored.episodeNumber} 集“${payload.restored.title}”的版本，并生成新的当前版本记录。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '版本恢复失败，请稍后重试。');
+    } finally {
+      setIsVersionRestoring(false);
     }
   }
 
@@ -372,7 +447,7 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -1599,6 +1674,35 @@ export default function Home() {
                     </div>
                   )}
 
+                  <div className="mb-4 rounded-xl border border-orange-200 bg-orange-50/60 p-4">
+                    <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-orange-950">整集批量导入与自动拆场</p>
+                        <p className="mt-1 text-xs leading-5 text-orange-900">粘贴带“第X场 / 场景X / INT.”标题的整集剧本，系统会拆成可逐场编译的草稿，不会直接覆盖已有场次。</p>
+                      </div>
+                      <Button variant="outline" onClick={splitBatchImport} disabled={busy || !batchImportText.trim()}><GitBranch data-icon="inline-start" />自动拆场</Button>
+                    </div>
+                    <Textarea
+                      aria-label="整集剧本批量导入"
+                      value={batchImportText}
+                      onChange={(event) => setBatchImportText(event.target.value)}
+                      className="mt-3 min-h-28 bg-white"
+                      placeholder={'第1场 客厅\n林晓：你什么时候辞职的？\n\n第2场 公司门口\n父亲：这件事我会解释。'}
+                      disabled={busy}
+                    />
+                    {batchDrafts.length > 0 && (
+                      <div className="mt-3 space-y-2">
+                        <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold text-orange-950">已拆分 {batchDrafts.length} 个场次草稿</p><Button size="sm" variant="ghost" onClick={() => setBatchDrafts([])} disabled={busy}>清空草稿</Button></div>
+                        {batchDrafts.map((draft, index) => (
+                          <div key={`${draft.title}-${index}`} className="flex flex-col justify-between gap-2 rounded-lg border border-orange-100 bg-white/80 p-3 sm:flex-row sm:items-center">
+                            <div className="min-w-0"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p><p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
+                            <Button size="sm" variant="outline" onClick={() => loadBatchDraft(draft)} disabled={busy}>载入编译</Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   {!latestScene ? (
                     <div className="grid min-h-[430px] place-items-center rounded-xl border border-dashed border-border bg-muted/25 p-8 text-center">
                       <div className="max-w-md">
@@ -1616,6 +1720,7 @@ export default function Home() {
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="text-[11px] text-muted-foreground">{new Date(scene.createdAt).toLocaleString('zh-CN')}</span>
                               <Button size="sm" variant="outline" onClick={() => void loadSavedScene(scene)} disabled={busy}>{isSceneLoading ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <FileText data-icon="inline-start" />}载入本场</Button>
+                              <Button size="sm" variant="outline" onClick={() => versionHistorySceneId === scene.id ? setVersionHistorySceneId(null) : void loadSceneVersions(scene.id)} disabled={busy || isVersionHistoryLoading}><RefreshCcw data-icon="inline-start" />版本历史{sceneVersions[scene.id]?.length ? ` (${sceneVersions[scene.id].length})` : ''}</Button>
                               {pendingDeleteSceneId === scene.id ? (
                                 <>
                                   <Button size="sm" variant="destructive" onClick={() => void deleteSavedScene(scene)} disabled={busy}>{isSceneDeleting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Trash2 data-icon="inline-start" />}确定删除</Button>
@@ -1626,6 +1731,17 @@ export default function Home() {
                               )}
                             </div>
                           </div>
+                          {versionHistorySceneId === scene.id && (
+                            <div className="mb-3 rounded-lg border border-violet-200 bg-violet-50/55 p-3">
+                              <div className="mb-2 flex items-center justify-between gap-2"><p className="text-xs font-semibold text-violet-950">版本历史</p><span className="text-[11px] text-violet-700">恢复后会保留当前版本</span></div>
+                              {isVersionHistoryLoading ? <p className="text-xs text-violet-800">正在载入版本…</p> : (sceneVersions[scene.id] ?? []).length === 0 ? <p className="text-xs text-violet-800">还没有可恢复的版本。</p> : <div className="space-y-2">{(sceneVersions[scene.id] ?? []).map((version) => (
+                                <div key={version.id} className="flex flex-col justify-between gap-2 rounded-md border border-violet-100 bg-white/80 p-2 sm:flex-row sm:items-center">
+                                  <div className="min-w-0"><p className="text-xs font-semibold text-violet-950">版本 {version.versionNumber} · {new Date(version.createdAt).toLocaleString('zh-CN')}</p><p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{version.scriptPreview}</p></div>
+                                  <Button size="sm" variant="outline" onClick={() => void restoreVersion(scene.id, version.id)} disabled={busy}>恢复此版本</Button>
+                                </div>
+                              ))}</div>}
+                            </div>
+                          )}
                           <div className="grid gap-2 sm:grid-cols-3">
                             <StateField label="空间 / 时间" value={`${scene.snapshot.spaceState} · ${scene.snapshot.timeState}`} />
                             <StateField label="人物站位 / 视线" value={`${scene.snapshot.characterPositions} · ${scene.snapshot.gazeDirection}`} />

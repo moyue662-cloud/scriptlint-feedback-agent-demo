@@ -1,11 +1,11 @@
 import { env } from 'cloudflare:workers';
 
-import { createEpisodeAiReviewsTableSql, createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql } from '@/db/schema';
+import { createEpisodeAiReviewsTableSql, createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql, createSceneVersionsIndexSql, createSceneVersionsTableSql } from '@/db/schema';
 import type { EpisodeAIReview } from '@/lib/episode-ai-review';
 import { buildSceneProductionSummary, DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type {
   DeliveryShotStatus, DeliveryTrackingState, EpisodeSummary, SceneProject,
-  SceneSnapshot, StoredScene, StoredSceneDetail,
+  SceneSnapshot, SceneVersionSummary, StoredScene, StoredSceneDetail,
 } from '@/lib/scene-state';
 import type { AnalysisResult } from '@/lib/script-engine';
 import type { StoryboardResult } from '@/lib/storyboard-engine';
@@ -51,6 +51,22 @@ interface EpisodeAIReviewRow {
   reviewed_at: string;
 }
 
+interface SceneVersionRow {
+  id: string;
+  scene_id: string;
+  project_id: string;
+  version_number: number;
+  episode_number: number;
+  title: string;
+  source_hash: string;
+  script: string;
+  analysis_json: string;
+  storyboard_json: string;
+  snapshot_json: string;
+  delivery_tracking_json?: string | null;
+  created_at: string;
+}
+
 function database() {
   return (env as unknown as { DB: D1Database }).DB;
 }
@@ -72,6 +88,18 @@ async function ensureSchema() {
     await db.prepare(createEpisodeSummariesTableSql).run();
     await db.prepare(createEpisodeAiReviewsTableSql).run();
     await db.prepare(createSceneStatesTableSql).run();
+    await db.prepare(createSceneVersionsTableSql).run();
+    await db.prepare(createSceneVersionsIndexSql).run();
+    await db.prepare(
+      `INSERT INTO scene_versions
+       (id, scene_id, project_id, version_number, episode_number, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
+       SELECT 'baseline:' || s.id, s.id, s.project_id, 1, s.episode_number, s.title, s.source_hash, s.script,
+         s.analysis_json, s.storyboard_json, s.snapshot_json, s.delivery_tracking_json, s.created_at
+       FROM scene_states s
+       WHERE NOT EXISTS (
+         SELECT 1 FROM scene_versions v WHERE v.scene_id = s.id AND v.project_id = s.project_id
+       )`,
+    ).run();
     const columns = await db.prepare('PRAGMA table_info(scene_states)').all<{ name: string }>();
     if (!columns.results.some((column) => column.name === 'delivery_tracking_json')) {
       try {
@@ -189,6 +217,88 @@ function toStoredSceneDetail(row: SceneRow): StoredSceneDetail {
     analysis: JSON.parse(row.analysis_json) as AnalysisResult,
     storyboard: JSON.parse(row.storyboard_json) as StoryboardResult,
   };
+}
+
+function toSceneVersionSummary(row: SceneVersionRow): SceneVersionSummary {
+  return {
+    id: row.id,
+    sceneId: row.scene_id,
+    projectId: row.project_id || DEFAULT_PROJECT_ID,
+    versionNumber: Math.max(1, Number(row.version_number) || 1),
+    episodeNumber: Math.max(1, Number(row.episode_number) || 1),
+    title: row.title,
+    scriptPreview: row.script.slice(0, 180),
+    createdAt: row.created_at,
+  };
+}
+
+async function recordSceneVersion(input: {
+  sceneId: string;
+  projectId: string;
+  episodeNumber: number;
+  title: string;
+  sourceHash: string;
+  script: string;
+  analysis: AnalysisResult;
+  storyboard: StoryboardResult;
+  snapshot: SceneSnapshot;
+  deliveryTracking: DeliveryTrackingState;
+}) {
+  const next = await database().prepare(
+    'SELECT COALESCE(MAX(version_number), 0) AS latest FROM scene_versions WHERE scene_id = ? AND project_id = ?',
+  ).bind(input.sceneId, input.projectId).first<{ latest: number }>();
+  const versionNumber = Number(next?.latest ?? 0) + 1;
+  await database().prepare(
+    `INSERT INTO scene_versions
+     (id, scene_id, project_id, version_number, episode_number, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(), input.sceneId, input.projectId, versionNumber, input.episodeNumber, input.title,
+    input.sourceHash, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
+    JSON.stringify(input.snapshot), JSON.stringify(input.deliveryTracking), new Date().toISOString(),
+  ).run();
+  return versionNumber;
+}
+
+export async function listSceneVersions(sceneId: string, projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const result = await database().prepare(
+    `SELECT id, scene_id, project_id, version_number, episode_number, title, source_hash, script,
+       analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at
+     FROM scene_versions WHERE scene_id = ? AND project_id = ? ORDER BY version_number DESC LIMIT 100`,
+  ).bind(sceneId, projectId).all<SceneVersionRow>();
+  return result.results.map(toSceneVersionSummary);
+}
+
+export async function restoreSceneVersion(input: { sceneId: string; versionId: string; projectId?: string }) {
+  await ensureSchema();
+  const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
+  const version = await database().prepare(
+    `SELECT id, scene_id, project_id, version_number, episode_number, title, source_hash, script,
+       analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at
+     FROM scene_versions WHERE id = ? AND scene_id = ? AND project_id = ?`,
+  ).bind(input.versionId, input.sceneId, projectId).first<SceneVersionRow>();
+  if (!version) return null;
+  const current = await database().prepare(
+    'SELECT id, scene_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(input.sceneId, projectId).first<{ id: string; scene_number: number; scene_order: number }>();
+  if (!current) return null;
+  const deliveryTracking = normalizeDeliveryTracking(version.delivery_tracking_json ? JSON.parse(version.delivery_tracking_json) : null);
+  const restoredSourceHash = `${version.source_hash}:restore:${crypto.randomUUID()}`;
+  await database().prepare(
+    `UPDATE scene_states SET episode_number = ?, title = ?, source_hash = ?, script = ?, analysis_json = ?, storyboard_json = ?,
+       snapshot_json = ?, delivery_tracking_json = ?, created_at = ? WHERE id = ? AND project_id = ?`,
+  ).bind(
+    version.episode_number, version.title, restoredSourceHash, version.script, version.analysis_json, version.storyboard_json,
+    version.snapshot_json, JSON.stringify(deliveryTracking), new Date().toISOString(), input.sceneId, projectId,
+  ).run();
+  await recordSceneVersion({
+    sceneId: input.sceneId, projectId, episodeNumber: version.episode_number, title: version.title,
+    sourceHash: restoredSourceHash, script: version.script, analysis: JSON.parse(version.analysis_json),
+    storyboard: JSON.parse(version.storyboard_json), snapshot: JSON.parse(version.snapshot_json), deliveryTracking,
+  });
+  await invalidateProjectApproval(projectId);
+  return getSceneById(input.sceneId, projectId);
 }
 
 export async function getProject(id = DEFAULT_PROJECT_ID) {
@@ -387,6 +497,10 @@ export async function saveScene(input: {
       episodeNumber, input.title, `${input.sourceHash}:${existing.id}`, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
       JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt, existing.id,
     ).run();
+    await recordSceneVersion({
+      sceneId: existing.id, projectId, episodeNumber, title: input.title, sourceHash: `${input.sourceHash}:${existing.id}`,
+      script: input.script, analysis: input.analysis, storyboard: input.storyboard, snapshot: input.snapshot, deliveryTracking,
+    });
     await invalidateProjectApproval(projectId);
     return {
       id: existing.id,
@@ -415,6 +529,10 @@ export async function saveScene(input: {
     JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
     JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt,
   ).run();
+  await recordSceneVersion({
+    sceneId: id, projectId, episodeNumber, title: input.title, sourceHash: `${input.sourceHash}:${id}`,
+    script: input.script, analysis: input.analysis, storyboard: input.storyboard, snapshot: input.snapshot, deliveryTracking,
+  });
   await invalidateProjectApproval(projectId);
   return { id, sceneNumber, episodeNumber, sceneOrder, updated: false };
 }
@@ -444,6 +562,8 @@ export async function deleteScene(input: { sceneId: string; projectId?: string }
   if (!current) return null;
 
   await db.prepare('DELETE FROM scene_states WHERE id = ? AND project_id = ?')
+    .bind(current.id, current.project_id).run();
+  await db.prepare('DELETE FROM scene_versions WHERE scene_id = ? AND project_id = ?')
     .bind(current.id, current.project_id).run();
   const remaining = await db.prepare(
     'SELECT id FROM scene_states WHERE project_id = ? ORDER BY scene_order ASC, scene_number ASC',

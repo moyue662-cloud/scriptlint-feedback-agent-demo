@@ -1,5 +1,5 @@
 import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '@/lib/scene-state';
-import { deleteScene, getEpisodeSceneNumber, getLatestScene, getPreviousScene, getSceneById, listScenes, moveScene, moveSceneBefore, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
+import { deleteScene, getEpisodeSceneNumber, getLatestScene, getPreviousScene, getSceneById, listSceneVersions, listScenes, moveScene, moveSceneBefore, restoreSceneVersion, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import { finalizeStoryboard, type StoryboardResult } from '@/lib/storyboard-engine';
 
@@ -79,6 +79,9 @@ export async function GET(request: Request) {
     const sceneId = new URL(request.url).searchParams.get('id')?.trim() ?? '';
     const projectId = new URL(request.url).searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
     if (sceneId) {
+      if (new URL(request.url).searchParams.get('action') === 'versions') {
+        return Response.json({ versions: await listSceneVersions(sceneId, projectId) });
+      }
       const scene = await getSceneById(sceneId, projectId);
       if (!scene) return Response.json({ error: '找不到要载入的场次。' }, { status: 404 });
       return Response.json({ scene });
@@ -165,7 +168,7 @@ export async function DELETE(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const body = await request.json() as { projectId?: string; sceneId?: string; targetSceneId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' | 'move-before' };
+    const body = await request.json() as { projectId?: string; sceneId?: string; targetSceneId?: string; versionId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' | 'move-before' | 'restore-version' };
     const sceneId = body.sceneId?.trim() ?? '';
     const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;
     if (!sceneId) {
@@ -182,6 +185,14 @@ export async function PATCH(request: Request) {
       const moved = await moveSceneBefore({ sceneId, targetSceneId, projectId });
       if (!moved) return Response.json({ error: '找不到要调整的场次。' }, { status: 404 });
       return Response.json({ moved: moved.moved });
+    }
+    if (body.action === 'restore-version') {
+      const versionId = body.versionId?.trim() ?? '';
+      if (!versionId) return Response.json({ error: '缺少要恢复的版本。' }, { status: 400 });
+      const restored = await restoreSceneVersion({ sceneId, versionId, projectId });
+      if (!restored) return Response.json({ error: '找不到要恢复的版本。' }, { status: 404 });
+      const scenes = await listScenes(projectId);
+      return Response.json({ restored, scenes });
     }
     if (body.deliveryTracking === undefined) {
       return Response.json({ error: '缺少场次或制作进度信息。' }, { status: 400 });
