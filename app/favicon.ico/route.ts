@@ -1,0 +1,17 @@
+export const runtime = 'edge';
+
+const favicon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs><linearGradient id="g" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse"><stop stop-color="#0284c7"/><stop offset="1" stop-color="#4f46e5"/></linearGradient></defs>
+  <rect width="64" height="64" rx="16" fill="url(#g)"/>
+  <path d="M17 18h30v21H29l-8 8v-8h-4V18Z" fill="none" stroke="white" stroke-width="4" stroke-linejoin="round"/>
+  <path d="m28 25 12 6-12 6V25Z" fill="white"/>
+</svg>`;
+
+export function GET() {
+  return new Response(favicon, {
+    headers: {
+      'Cache-Control': 'public, max-age=86400',
+      'Content-Type': 'image/svg+xml; charset=utf-8',
+    },
+  });
+}
