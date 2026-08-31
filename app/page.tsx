@@ -19,8 +19,8 @@ import {
   analyzeScript, repairAnalysis, type AnalysisResult, type AnalysisSource,
 } from '@/lib/script-engine';
 import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
-import type { EpisodeAIReview } from '@/lib/episode-ai-review';
-import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
+import { passesEpisodeAIReviewGate, type EpisodeAIReview } from '@/lib/episode-ai-review';
+import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState } from '@/lib/scene-state';
 import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
 import {
   buildFallbackStoryboard, finalizeStoryboard, type ShotState, type StoryboardResult,
@@ -189,7 +189,7 @@ export default function Home() {
     setIsSceneLoading(true);
     setNotice('');
     try {
-      const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}`);
+      const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
       const payload = await response.json() as { scene?: StoredSceneDetail; error?: string };
       if (!response.ok || !payload.scene) throw new Error(payload.error || '场次载入失败');
       const detail = payload.scene;
@@ -462,7 +462,9 @@ export default function Home() {
     : null;
   const projectReady = episodeReviews.length > 0
     && episodeReviews.every((review) => review.status === 'ready')
-    && episodeOptions.every((currentEpisodeNumber) => episodeAIReviews.some((review) => review.episodeNumber === currentEpisodeNumber && review.status === 'ready'));
+    && episodeOptions.every((currentEpisodeNumber) => passesEpisodeAIReviewGate(
+      episodeAIReviews.find((review) => review.episodeNumber === currentEpisodeNumber),
+    ));
   const blockedEpisodeCount = episodeOptions.filter((currentEpisodeNumber) => (
     episodeReviews.find((review) => review.episodeNumber === currentEpisodeNumber)?.status === 'blocked'
     || episodeAIReviews.find((review) => review.episodeNumber === currentEpisodeNumber)?.status === 'blocked'
@@ -584,7 +586,16 @@ export default function Home() {
         if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
         nextStoryboard = payload.result;
       } catch {
-        nextStoryboard = finalizeStoryboard(buildFallbackStoryboard(analysis), analysis);
+        const previousScene = loadedSceneId
+          ? [...scenes]
+              .sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber)
+              .filter((scene) => scene.sceneOrder < (scenes.find((item) => item.id === loadedSceneId)?.sceneOrder ?? 0))
+              .at(-1) ?? null
+          : latestScene;
+        nextStoryboard = finalizeStoryboard(
+          inheritStoryboardOpeningState(buildFallbackStoryboard(analysis), previousScene, script),
+          analysis,
+        );
       }
       setStoryboard(nextStoryboard);
       setStoryboardLoopCount(0);
@@ -805,7 +816,7 @@ export default function Home() {
       const response = await fetch('/api/scenes', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sceneId, action: direction }),
+        body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, action: direction }),
       });
       const payload = await response.json() as { moved?: boolean; error?: string };
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
@@ -853,7 +864,7 @@ export default function Home() {
       const response = await fetch('/api/scenes', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sceneId, targetSceneId, action: 'move-before' }),
+        body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, targetSceneId, action: 'move-before' }),
       });
       const payload = await response.json() as { moved?: boolean; error?: string };
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
@@ -907,12 +918,10 @@ export default function Home() {
       const response = await fetch('/api/scenes', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sceneId, deliveryTracking: { statuses } }),
+        body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, deliveryTracking: { statuses } }),
       });
       const payload = await response.json() as { tracking?: StoredScene['deliveryTracking']; error?: string };
       if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
-      const changedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
-      if (changedEpisode) invalidateEpisodeAIReview(changedEpisode);
       await Promise.all([loadScenes(), loadProject()]);
       setNotice('制作进度已保存，刷新页面后仍可继续。');
     }).catch((error) => {
@@ -1476,7 +1485,7 @@ export default function Home() {
                             <span className={`grid size-9 place-items-center rounded-xl ${project?.approvedAt && projectReady ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}><PackageCheck className="size-4" /></span>
                             <div>
                               <p className="text-sm font-semibold text-slate-950">项目最终交付门禁</p>
-                              <p className="mt-0.5 text-xs text-slate-700">全部集数通过固定规则、AI深度审查和镜头验收后，由人完成最后一次整部项目确认。</p>
+                              <p className="mt-0.5 text-xs text-slate-700">全部集数通过固定规则、完成AI深度审查且没有结构阻断后，由人判断优化建议并完成最终确认。</p>
                             </div>
                             <Badge variant="outline" className={project?.approvedAt && projectReady ? 'border-emerald-200 bg-white text-emerald-800' : projectReady ? 'border-sky-200 bg-white text-sky-800' : 'border-amber-200 bg-white text-amber-800'}>
                               {project?.approvedAt && projectReady ? '最终执行包就绪' : projectReady ? '等待人工终审' : '门禁未通过'}
@@ -1489,7 +1498,7 @@ export default function Home() {
                             <div className="rounded-lg bg-white/80 p-3 text-xs text-emerald-700"><p className="text-lg font-semibold tabular-nums">{sceneTimeline.acceptedShots}/{sceneTimeline.totalShots}</p><p>镜头已验收</p></div>
                           </div>
                           {project?.approvedAt && <p className="mt-3 text-[11px] text-emerald-800">人工终审时间：{new Date(project.approvedAt).toLocaleString('zh-CN')}。任何场次、总结、顺序或制作进度变更都会自动撤销终审。</p>}
-                          {!projectReady && <p className="mt-3 text-[11px] text-amber-800">先处理各集的固定规则与AI深度审查问题，并完成全部镜头验收。任何内容变化后都需要重新运行AI整集审查。</p>}
+                          {!projectReady && <p className="mt-3 text-[11px] text-amber-800">先处理各集固定规则、完成镜头验收，并确保最新AI审查没有结构阻断。AI的软性优化建议由人工终审决定是否采纳。</p>}
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-2">
                           <Button variant="outline" onClick={() => void exportProjectPackage()} disabled={busy}>

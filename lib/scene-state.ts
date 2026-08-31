@@ -57,6 +57,26 @@ export function sceneSnapshotToShotState(snapshot: SceneSnapshot): ShotState {
   };
 }
 
+export function inheritStoryboardOpeningState<T extends { shots: StoryboardResult['shots'] }>(
+  storyboard: T,
+  previousScene: StoredScene | null,
+  script: string,
+): T {
+  const firstShot = storyboard.shots[0];
+  if (!previousScene || !firstShot || hasExplicitSceneTransition(script, firstShot.continuityReason)) return storyboard;
+  return {
+    ...storyboard,
+    shots: [
+      {
+        ...firstShot,
+        startState: sceneSnapshotToShotState(previousScene.snapshot),
+        continuityReason: `跨场连续承接“${previousScene.title}”结束状态`,
+      },
+      ...storyboard.shots.slice(1),
+    ],
+  };
+}
+
 export interface SceneProject {
   id: string;
   name: string;

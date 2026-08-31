@@ -26,6 +26,10 @@ export interface EpisodeAIReview {
   reviewedAt: string;
 }
 
+export function passesEpisodeAIReviewGate(review: EpisodeAIReview | null | undefined) {
+  return Boolean(review && review.status !== 'blocked');
+}
+
 export async function buildEpisodeSourceHash(
   episodeNumber: number,
   scenes: StoredSceneDetail[],
@@ -43,7 +47,6 @@ export async function buildEpisodeSourceHash(
       .map((scene) => ({
         id: scene.id, order: scene.sceneOrder, title: scene.title, script: scene.script,
         analyzedAt: scene.analysis.analyzedAt, storyboardAt: scene.storyboard.generatedAt,
-        deliveryUpdatedAt: scene.deliveryTracking.updatedAt,
       })),
   });
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));

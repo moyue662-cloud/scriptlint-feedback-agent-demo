@@ -1,5 +1,5 @@
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
-import { buildEpisodeSourceHash } from '@/lib/episode-ai-review';
+import { buildEpisodeSourceHash, passesEpisodeAIReviewGate } from '@/lib/episode-ai-review';
 import { buildEpisodeReview } from '@/lib/episode-review';
 import { getProject, listEpisodeAIReviews, listEpisodeSummaries, listSceneDetails, setProjectApproval, updateProjectName } from '@/lib/scene-db';
 
@@ -48,11 +48,11 @@ export async function PATCH(request: Request) {
           const summary = summaries.find((item) => item.episodeNumber === episodeNumber) ?? null;
           const sourceHash = await buildEpisodeSourceHash(episodeNumber, scenes, summary);
           const aiReview = aiReviews.find((review) => review.episodeNumber === episodeNumber && review.sourceHash === sourceHash);
-          if (!aiReview || aiReview.status !== 'ready') aiIncomplete.push(episodeNumber);
+          if (!passesEpisodeAIReviewGate(aiReview)) aiIncomplete.push(episodeNumber);
         }
         if (aiIncomplete.length > 0) {
           return Response.json({
-            error: `第 ${aiIncomplete.join('、')} 集尚未通过最新的AI深度结构审查。`,
+            error: `第 ${aiIncomplete.join('、')} 集缺少最新AI审查或仍有结构阻断。`,
           }, { status: 409 });
         }
       }

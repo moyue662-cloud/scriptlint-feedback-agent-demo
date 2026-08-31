@@ -77,12 +77,12 @@ function isValidStoryboard(value: unknown): value is StoryboardResult {
 export async function GET(request: Request) {
   try {
     const sceneId = new URL(request.url).searchParams.get('id')?.trim() ?? '';
+    const projectId = new URL(request.url).searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
     if (sceneId) {
-      const scene = await getSceneById(sceneId);
+      const scene = await getSceneById(sceneId, projectId);
       if (!scene) return Response.json({ error: '找不到要载入的场次。' }, { status: 404 });
       return Response.json({ scene });
     }
-    const projectId = new URL(request.url).searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
     const scenes = await listScenes(projectId);
     return Response.json({
       scenes,
@@ -165,27 +165,28 @@ export async function DELETE(request: Request) {
 
 export async function PATCH(request: Request) {
   try {
-    const body = await request.json() as { sceneId?: string; targetSceneId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' | 'move-before' };
+    const body = await request.json() as { projectId?: string; sceneId?: string; targetSceneId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' | 'move-before' };
     const sceneId = body.sceneId?.trim() ?? '';
+    const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;
     if (!sceneId) {
       return Response.json({ error: '缺少场次或制作进度信息。' }, { status: 400 });
     }
     if (body.action === 'move-up' || body.action === 'move-down') {
-      const moved = await moveScene({ sceneId, direction: body.action === 'move-up' ? 'up' : 'down' });
+      const moved = await moveScene({ sceneId, projectId, direction: body.action === 'move-up' ? 'up' : 'down' });
       if (!moved) return Response.json({ error: '找不到要调整的场次。' }, { status: 404 });
       return Response.json({ moved: moved.moved });
     }
     if (body.action === 'move-before') {
       const targetSceneId = body.targetSceneId?.trim() ?? '';
       if (!targetSceneId) return Response.json({ error: '缺少目标场次。' }, { status: 400 });
-      const moved = await moveSceneBefore({ sceneId, targetSceneId });
+      const moved = await moveSceneBefore({ sceneId, targetSceneId, projectId });
       if (!moved) return Response.json({ error: '找不到要调整的场次。' }, { status: 404 });
       return Response.json({ moved: moved.moved });
     }
     if (body.deliveryTracking === undefined) {
       return Response.json({ error: '缺少场次或制作进度信息。' }, { status: 400 });
     }
-    const tracking = await updateSceneDeliveryTracking({ sceneId, tracking: body.deliveryTracking });
+    const tracking = await updateSceneDeliveryTracking({ sceneId, projectId, tracking: body.deliveryTracking });
     if (!tracking) return Response.json({ error: '找不到要更新的场次。' }, { status: 404 });
     return Response.json({ tracking });
   } catch (error) {

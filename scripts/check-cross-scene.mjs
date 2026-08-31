@@ -8,8 +8,8 @@ const { module: stateModule } = await runnerImport(path.resolve('lib/scene-state
 const { module: aiReviewModule } = await runnerImport(path.resolve('lib/episode-ai-review.ts'), loadOptions);
 
 const { buildEpisodeReview } = episodeModule;
-const { buildSceneSnapshot } = stateModule;
-const { buildEpisodeSourceHash } = aiReviewModule;
+const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
+const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -90,5 +90,28 @@ const { buildEpisodeSourceHash } = aiReviewModule;
   ], summary);
   assert.notEqual(originalHash, changedSummaryHash);
   assert.notEqual(originalHash, reorderedHash);
+
+  const deliveryOnlyHash = await buildEpisodeSourceHash(1, [
+    { ...detailScenes[0], deliveryTracking: { statuses: { s1: 'submitted' }, updatedAt: 'later' } },
+    detailScenes[1],
+  ], summary);
+  assert.equal(originalHash, deliveryOnlyHash);
+
+  const inheritedStoryboard = inheritStoryboardOpeningState(
+    { ...storyboard, shots: [{ ...storyboard.shots[0], startState: changedOpening }] },
+    first,
+    '林晓继续追问父亲。',
+  );
+  assert.deepEqual(inheritedStoryboard.shots[0].startState, endState);
+  const transitionedStoryboard = inheritStoryboardOpeningState(
+    { ...storyboard, shots: [{ ...storyboard.shots[0], startState: changedOpening }] },
+    first,
+    '第二天，林晓来到公司。',
+  );
+  assert.deepEqual(transitionedStoryboard.shots[0].startState, changedOpening);
+
+  assert.equal(passesEpisodeAIReviewGate({ status: 'attention' }), true);
+  assert.equal(passesEpisodeAIReviewGate({ status: 'blocked' }), false);
+  assert.equal(passesEpisodeAIReviewGate(null), false);
 
 console.log('cross-scene regression checks passed');

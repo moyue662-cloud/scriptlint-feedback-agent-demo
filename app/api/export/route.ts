@@ -1,5 +1,5 @@
 import { buildEpisodeReview } from '@/lib/episode-review';
-import { buildEpisodeSourceHash } from '@/lib/episode-ai-review';
+import { buildEpisodeSourceHash, passesEpisodeAIReviewGate } from '@/lib/episode-ai-review';
 import { getProject, listEpisodeAIReviews, listEpisodeSummaries, listSceneDetails } from '@/lib/scene-db';
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 
@@ -31,7 +31,7 @@ export async function GET() {
         scenes: scenes.filter((scene) => scene.episodeNumber === episodeNumber),
       };
     }));
-    const ready = episodes.length > 0 && episodes.every((episode) => episode.review.status === 'ready' && episode.aiReview?.status === 'ready');
+    const ready = episodes.length > 0 && episodes.every((episode) => episode.review.status === 'ready' && passesEpisodeAIReviewGate(episode.aiReview));
     return Response.json({
       schemaVersion: 1,
       packageType: project.approvedAt && ready ? 'final' : 'review-draft',

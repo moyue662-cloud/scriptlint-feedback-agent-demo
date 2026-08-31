@@ -58,22 +58,27 @@ function parseReview(text: string, validSceneIds: Set<string>) {
   const last = clean.lastIndexOf('}');
   const parsed = JSON.parse(first >= 0 && last > first ? clean.slice(first, last + 1) : clean) as Record<string, unknown>;
   const rawIssues = Array.isArray(parsed.issues) ? parsed.issues : [];
+  let rejectedIssueCount = 0;
   const issues: EpisodeAIReviewIssue[] = rawIssues.slice(0, 20).flatMap((value, index) => {
-    if (!value || typeof value !== 'object') return [];
+    const reject = () => {
+      rejectedIssueCount += 1;
+      return [];
+    };
+    if (!value || typeof value !== 'object') return reject();
     const issue = value as Record<string, unknown>;
-    if ((issue.severity !== 'hard' && issue.severity !== 'soft') || typeof issue.category !== 'string' || !categories.has(issue.category as EpisodeAIReviewCategory)) return [];
-    if (typeof issue.title !== 'string' || typeof issue.detail !== 'string' || typeof issue.suggestion !== 'string') return [];
+    if ((issue.severity !== 'hard' && issue.severity !== 'soft') || typeof issue.category !== 'string' || !categories.has(issue.category as EpisodeAIReviewCategory)) return reject();
+    if (typeof issue.title !== 'string' || typeof issue.detail !== 'string' || typeof issue.suggestion !== 'string') return reject();
     const sceneIds = Array.isArray(issue.sceneIds)
       ? issue.sceneIds.filter((id): id is string => typeof id === 'string' && validSceneIds.has(id)).slice(0, 8)
       : [];
-    if (sceneIds.length === 0) return [];
+    if (sceneIds.length === 0 || !issue.title.trim() || !issue.detail.trim() || !issue.suggestion.trim()) return reject();
     return [{
       id: typeof issue.id === 'string' && issue.id.trim() ? issue.id.trim() : `AI${index + 1}`,
       severity: issue.severity, category: issue.category as EpisodeAIReviewCategory, sceneIds,
       title: issue.title.trim(), detail: issue.detail.trim(), suggestion: issue.suggestion.trim(),
     }];
   });
-  return {
+  const result = {
     overview: typeof parsed.overview === 'string' ? parsed.overview.trim() : '',
     hookAssessment: typeof parsed.hookAssessment === 'string' ? parsed.hookAssessment.trim() : '',
     strengths: Array.isArray(parsed.strengths)
@@ -81,6 +86,10 @@ function parseReview(text: string, validSceneIds: Set<string>) {
       : [],
     issues,
   };
+  if (!result.overview || !result.hookAssessment || rejectedIssueCount > 0 || rawIssues.length > 20) {
+    throw new Error('模型返回的审查结果未通过结构和场次引用校验');
+  }
+  return result;
 }
 
 export async function GET(request: Request) {
@@ -137,6 +146,9 @@ export async function POST(request: Request) {
         openingState: scene.openingState, endingState: scene.snapshot,
       })),
     });
+    if (input.length > 150000) {
+      return Response.json({ error: '本集内容过长，无法可靠完成整集审查；请拆分集数或精简单场剧本。' }, { status: 413 });
+    }
     const response = await fetch(API_URL, {
       method: 'POST',
       headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
@@ -152,7 +164,13 @@ export async function POST(request: Request) {
     if (!response.ok) return Response.json({ error: 'AI整集审查暂时不可用，请稍后重试。' }, { status: 502 });
     const text = outputText(payload);
     if (!text) return Response.json({ error: '模型没有返回可用的整集审查结果。' }, { status: 502 });
-    const parsed = parseReview(text, new Set(scenes.map((scene) => scene.id)));
+    let parsed: ReturnType<typeof parseReview>;
+    try {
+      parsed = parseReview(text, new Set(scenes.map((scene) => scene.id)));
+    } catch (error) {
+      console.warn('Episode AI review validation failed', error instanceof Error ? error.message : 'unknown error');
+      return Response.json({ error: '模型返回的审查引用不可靠，请重新运行。' }, { status: 502 });
+    }
     const hardCount = parsed.issues.filter((issue) => issue.severity === 'hard').length;
     const softCount = parsed.issues.length - hardCount;
     const reviewedAt = new Date().toISOString();

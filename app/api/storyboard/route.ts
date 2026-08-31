@@ -1,6 +1,6 @@
 import type { AnalysisResult } from '@/lib/script-engine';
 import { getLatestScene, getPreviousScene } from '@/lib/scene-db';
-import { DEFAULT_PROJECT_ID, hasExplicitSceneTransition, sceneContinuityContext, sceneSnapshotToShotState } from '@/lib/scene-state';
+import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState, sceneContinuityContext } from '@/lib/scene-state';
 import {
   addStoryboardRepairHistory,
   buildFallbackStoryboard,
@@ -229,20 +229,7 @@ export async function POST(request: Request) {
     const scoped = repairMode && body.current && scope
       ? enforceStoryboardRepairScope(body.current, parsed, scope)
       : parsed;
-    const firstShot = scoped.shots[0];
-    const continuityScoped = previousScene && firstShot && !hasExplicitSceneTransition(body.script, firstShot.continuityReason)
-      ? {
-          ...scoped,
-          shots: [
-            {
-              ...firstShot,
-              startState: sceneSnapshotToShotState(previousScene.snapshot),
-              continuityReason: `跨场连续承接“${previousScene.title}”结束状态`,
-            },
-            ...scoped.shots.slice(1),
-          ],
-        }
-      : scoped;
+    const continuityScoped = inheritStoryboardOpeningState(scoped, previousScene, body.script);
     const finalized = finalizeStoryboard(continuityScoped, body.analysis, scope?.lockedShotIds);
     const result = repairMode && body.current
       ? addStoryboardRepairHistory(body.current, finalized)

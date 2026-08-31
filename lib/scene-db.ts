@@ -298,7 +298,7 @@ export async function upsertEpisodeSummary(input: {
   return row ? toEpisodeSummary(row) : null;
 }
 
-export async function listScenes(projectId = DEFAULT_PROJECT_ID, limit = 200) {
+export async function listScenes(projectId = DEFAULT_PROJECT_ID, limit = 500) {
   await ensureSchema();
   const result = await database().prepare(
     `SELECT id, project_id, scene_number, episode_number, scene_order, title, script, storyboard_json, snapshot_json, delivery_tracking_json, created_at
@@ -331,13 +331,13 @@ export async function getPreviousScene(sceneId: string, projectId = DEFAULT_PROJ
   return row ? toStoredScene(row) : null;
 }
 
-export async function getSceneById(id: string) {
+export async function getSceneById(id: string, projectId = DEFAULT_PROJECT_ID) {
   await ensureSchema();
   const row = await database().prepare(
     `SELECT id, project_id, scene_number, episode_number, scene_order, title, script, analysis_json, storyboard_json,
        snapshot_json, delivery_tracking_json, created_at
-     FROM scene_states WHERE id = ?`,
-  ).bind(id).first<SceneRow>();
+     FROM scene_states WHERE id = ? AND project_id = ?`,
+  ).bind(id, projectId).first<SceneRow>();
   return row ? toStoredSceneDetail(row) : null;
 }
 
@@ -372,9 +372,7 @@ export async function saveScene(input: {
     ? await database().prepare(
         'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
       ).bind(input.sceneId, projectId).first<{ id: string; scene_number: number; episode_number: number; scene_order: number }>()
-    : await database().prepare(
-        'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE project_id = ? AND source_hash = ?',
-      ).bind(projectId, input.sourceHash).first<{ id: string; scene_number: number; episode_number: number; scene_order: number }>();
+    : null;
   if (input.sceneId && !existing) throw new Error('场次不存在或不属于当前项目');
   const createdAt = new Date().toISOString();
   const shotIds = new Set(input.storyboard.shots.map((shot) => shot.id));
@@ -386,7 +384,7 @@ export async function saveScene(input: {
       `UPDATE scene_states SET episode_number = ?, title = ?, source_hash = ?, script = ?, analysis_json = ?, storyboard_json = ?,
        snapshot_json = ?, delivery_tracking_json = ?, created_at = ? WHERE id = ?`,
     ).bind(
-      episodeNumber, input.title, input.sourceHash, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
+      episodeNumber, input.title, `${input.sourceHash}:${existing.id}`, input.script, JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
       JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt, existing.id,
     ).run();
     await invalidateProjectApproval(projectId);
@@ -413,7 +411,7 @@ export async function saveScene(input: {
      (id, project_id, scene_number, episode_number, scene_order, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
-    id, projectId, sceneNumber, episodeNumber, sceneOrder, input.title, input.sourceHash, input.script,
+    id, projectId, sceneNumber, episodeNumber, sceneOrder, input.title, `${input.sourceHash}:${id}`, input.script,
     JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
     JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt,
   ).run();
@@ -463,12 +461,12 @@ export async function deleteScene(input: { sceneId: string; projectId?: string }
   return { id: current.id, projectId: current.project_id };
 }
 
-export async function moveScene(input: { sceneId: string; direction: 'up' | 'down' }) {
+export async function moveScene(input: { sceneId: string; projectId?: string; direction: 'up' | 'down' }) {
   await ensureSchema();
   const db = database();
   const current = await db.prepare(
-    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ?',
-  ).bind(input.sceneId).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
+    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(input.sceneId, input.projectId?.trim() || DEFAULT_PROJECT_ID).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
   if (!current) return null;
   const comparison = input.direction === 'up' ? '<' : '>';
   const order = input.direction === 'up' ? 'DESC' : 'ASC';
@@ -488,15 +486,15 @@ export async function moveScene(input: { sceneId: string; direction: 'up' | 'dow
   return { moved: true };
 }
 
-export async function moveSceneBefore(input: { sceneId: string; targetSceneId: string }) {
+export async function moveSceneBefore(input: { sceneId: string; targetSceneId: string; projectId?: string }) {
   await ensureSchema();
   const db = database();
   const current = await db.prepare(
-    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ?',
-  ).bind(input.sceneId).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
+    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(input.sceneId, input.projectId?.trim() || DEFAULT_PROJECT_ID).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
   const target = await db.prepare(
-    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ?',
-  ).bind(input.targetSceneId).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
+    'SELECT id, project_id, episode_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(input.targetSceneId, input.projectId?.trim() || DEFAULT_PROJECT_ID).first<{ id: string; project_id: string; episode_number: number; scene_order: number }>();
   if (!current || !target) return null;
   if (current.id === target.id || current.project_id !== target.project_id || current.episode_number !== target.episode_number) {
     return { moved: false };
@@ -528,12 +526,13 @@ export async function moveSceneBefore(input: { sceneId: string; targetSceneId: s
 
 export async function updateSceneDeliveryTracking(input: {
   sceneId: string;
+  projectId?: string;
   tracking: unknown;
 }) {
   await ensureSchema();
   const row = await database().prepare(
-    'SELECT project_id, storyboard_json FROM scene_states WHERE id = ?',
-  ).bind(input.sceneId).first<{ project_id: string; storyboard_json: string }>();
+    'SELECT project_id, storyboard_json FROM scene_states WHERE id = ? AND project_id = ?',
+  ).bind(input.sceneId, input.projectId?.trim() || DEFAULT_PROJECT_ID).first<{ project_id: string; storyboard_json: string }>();
   if (!row) return null;
   const storyboard = JSON.parse(row.storyboard_json) as StoryboardResult;
   const shotIds = new Set(storyboard.shots.map((shot) => shot.id));
