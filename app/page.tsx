@@ -203,6 +203,7 @@ export default function Home() {
   const [isQualityEvaluating, setIsQualityEvaluating] = useState(false);
   const visualFileInputRef = useRef<HTMLInputElement | null>(null);
   const deliverySaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const [activeTab, setActiveTab] = useState('beats');
 
   async function loadScenes() {
     try {
@@ -524,6 +525,9 @@ export default function Home() {
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
   const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating;
+  const localStructureEstimate = useMemo(() => script.trim() ? analyzeScript(script).beats.length : 0, [script]);
+  const sceneDraftEstimate = useMemo(() => script.trim() ? splitScriptIntoScenes(script, episodeNumber) : [], [script, episodeNumber]);
+  const shouldSuggestBatchImport = localStructureEstimate > 30 || sceneDraftEstimate.length > 1 || script.length > 6000;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -653,6 +657,12 @@ export default function Home() {
     return { total: shots.length, submittedCount, acceptedCount, complete: shots.length > 0 && acceptedCount === shots.length };
   }, [deliveryPackage, deliveryShotStatuses]);
 
+  function routeLongScriptToBatchImport() {
+    setBatchImportText(script);
+    setActiveTab('states');
+    setNotice(`当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，并识别到 ${sceneDraftEstimate.length} 个场次标题` : ''}。已放入“整集批量导入”，请先自动拆场，再逐场编译。`);
+  }
+
   async function requestAI(body: Record<string, unknown>) {
     const response = await fetch('/api/analyze', {
       method: 'POST',
@@ -677,6 +687,10 @@ export default function Home() {
 
   async function runFullPipeline() {
     if (!script.trim() || busy) return;
+    if (shouldSuggestBatchImport) {
+      routeLongScriptToBatchImport();
+      return;
+    }
     setIsPipelineRunning(true);
     setPipelinePhase('analyzing');
     setPipelineStep('正在读取原始剧本并建立交互节拍');
@@ -799,6 +813,10 @@ export default function Home() {
   }
 
   async function runAnalysis() {
+    if (shouldSuggestBatchImport) {
+      routeLongScriptToBatchImport();
+      return;
+    }
     setIsRunning(true);
     setNotice('');
     window.localStorage.setItem('scene-flow-script', script);
@@ -1293,6 +1311,12 @@ export default function Home() {
                     <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />{notice}
                   </output>
                 )}
+                {shouldSuggestBatchImport && (
+                  <div className="mt-3 flex flex-col justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5 text-xs leading-5 text-sky-900 sm:flex-row sm:items-center">
+                    <div><p className="font-semibold">这段内容可能不止一场戏</p><p className="mt-0.5">当前检测到约 {localStructureEstimate} 个结构单元。单场编译更稳定，建议先按场次拆分；系统不会把这个估算值当成剧本事实。</p></div>
+                    <Button size="sm" variant="outline" onClick={routeLongScriptToBatchImport} disabled={busy}><GitBranch data-icon="inline-start" />转到批量拆场</Button>
+                  </div>
+                )}
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
                   <button className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" onClick={() => setScript(sampleScript)}>
                     恢复示例剧本
@@ -1349,7 +1373,7 @@ export default function Home() {
           </div>
 
           <Card className="min-h-[700px] border-0 shadow-[0_14px_50px_rgba(56,41,35,.08)] ring-border">
-            <Tabs defaultValue="beats" className="h-full">
+            <Tabs value={activeTab} onValueChange={setActiveTab} className="h-full">
               <CardHeader className="border-b border-border/70 pb-3">
                 <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
                   <div><CardTitle>AI执行结构</CardTitle><CardDescription>每项输出均可追溯到原剧本句子。</CardDescription></div>
