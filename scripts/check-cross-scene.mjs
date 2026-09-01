@@ -121,5 +121,9 @@ const { splitScriptIntoScenes } = batchImportModule;
   assert.equal(imported[0].title, '第1场 客厅');
   assert.match(imported[1].script, /父亲/);
   assert.equal(splitScriptIntoScenes('只有一场戏').length, 1);
+  const longScript = Array.from({ length: 36 }, (_, index) => `林晓在桌边观察父亲的动作${index + 1}。`).join('');
+  const suggestedChunks = splitScriptIntoScenes(longScript);
+  assert.ok(suggestedChunks.length > 1);
+  assert.equal(suggestedChunks[0].splitReason, 'length');
 
 console.log('cross-scene regression checks passed');

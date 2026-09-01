@@ -659,8 +659,9 @@ export default function Home() {
 
   function routeLongScriptToBatchImport() {
     setBatchImportText(script);
+    setBatchDrafts(splitScriptIntoScenes(script, episodeNumber));
     setActiveTab('states');
-    setNotice(`当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，并识别到 ${sceneDraftEstimate.length} 个场次标题` : ''}。已放入“整集批量导入”，请先自动拆场，再逐场编译。`);
+    setNotice(`当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，已生成 ${sceneDraftEstimate.length} 个分场草稿` : ''}。请先确认分场边界，再逐场编译。`);
   }
 
   async function requestAI(body: Record<string, unknown>) {
@@ -1876,7 +1877,7 @@ export default function Home() {
                     <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-orange-950">整集批量导入与自动拆场</p>
-                        <p className="mt-1 text-xs leading-5 text-orange-900">粘贴带“第X场 / 场景X / INT.”标题的整集剧本，系统会拆成可逐场编译的草稿，不会直接覆盖已有场次。</p>
+                        <p className="mt-1 text-xs leading-5 text-orange-900">粘贴带“第X场 / 场景X / INT.”标题的整集剧本，系统会拆成可逐场编译的草稿；没有标题的长文本会按段落或长度生成“分段建议”，请人工确认边界，不会直接覆盖已有场次。</p>
                       </div>
                       <Button variant="outline" onClick={splitBatchImport} disabled={busy || !batchImportText.trim()}><GitBranch data-icon="inline-start" />自动拆场</Button>
                     </div>
@@ -1893,7 +1894,7 @@ export default function Home() {
                         <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold text-orange-950">已拆分 {batchDrafts.length} 个场次草稿</p><Button size="sm" variant="ghost" onClick={() => setBatchDrafts([])} disabled={busy}>清空草稿</Button></div>
                         {batchDrafts.map((draft, index) => (
                           <div key={`${draft.title}-${index}`} className="flex flex-col justify-between gap-2 rounded-lg border border-orange-100 bg-white/80 p-3 sm:flex-row sm:items-center">
-                            <div className="min-w-0"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p><p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
+                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p>{draft.splitReason !== 'heading' && <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">待确认分段</Badge>}</div><p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
                             <Button size="sm" variant="outline" onClick={() => loadBatchDraft(draft)} disabled={busy}>载入编译</Button>
                           </div>
                         ))}
