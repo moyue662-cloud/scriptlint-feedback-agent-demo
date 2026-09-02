@@ -8,12 +8,14 @@ const { module: stateModule } = await runnerImport(path.resolve('lib/scene-state
 const { module: aiReviewModule } = await runnerImport(path.resolve('lib/episode-ai-review.ts'), loadOptions);
 const { module: batchImportModule } = await runnerImport(path.resolve('lib/batch-import.ts'), loadOptions);
 const { module: scriptEngineModule } = await runnerImport(path.resolve('lib/script-engine.ts'), loadOptions);
+const { module: adaptationModule } = await runnerImport(path.resolve('lib/novel-adaptation.ts'), loadOptions);
 
 const { buildEpisodeReview } = episodeModule;
 const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
 const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
 const { splitScriptIntoScenes } = batchImportModule;
 const { analyzeScript, normalizeAnalysisResult } = scriptEngineModule;
+const { normalizeNovelAdaptation } = adaptationModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -126,16 +128,32 @@ const { analyzeScript, normalizeAnalysisResult } = scriptEngineModule;
   assert.equal(colonHeadings.length, 2);
   assert.equal(colonHeadings[0].title, '第1场：客厅');
   const paragraphSuggestions = splitScriptIntoScenes('第一段交互。\n\n第二段交互。');
-  assert.equal(paragraphSuggestions.length, 2);
-  assert.equal(paragraphSuggestions[0].splitReason, 'paragraph');
+  assert.equal(paragraphSuggestions.length, 1);
   assert.equal(splitScriptIntoScenes('只有一场戏').length, 1);
-  const longScript = Array.from({ length: 36 }, (_, index) => `林晓在桌边观察父亲的动作${index + 1}。`).join('');
+  const longScript = Array.from({ length: 90 }, (_, index) => `林晓在桌边观察父亲的动作${index + 1}。`).join('');
   const suggestedChunks = splitScriptIntoScenes(longScript);
   assert.ok(suggestedChunks.length > 1);
-  assert.equal(suggestedChunks[0].splitReason, 'length');
+  assert.equal(suggestedChunks[0].splitReason, 'grouped');
+  assert.ok(suggestedChunks.every((draft) => draft.script.length >= 260));
+  assert.ok(suggestedChunks.every((draft) => draft.estimatedDurationSec >= 20));
   const unpunctuated = splitScriptIntoScenes('超长无标点文本'.repeat(1300));
   assert.ok(unpunctuated.length > 1);
-  assert.ok(unpunctuated.every((draft) => draft.script.length <= 1800));
+  assert.ok(unpunctuated.length <= 24);
+  assert.ok(unpunctuated.every((draft) => draft.script.length <= 980));
+
+  const adapted = normalizeNovelAdaptation({
+    theme: '敬畏细节', logline: '林玄守住细节，张宸因狂妄失去机会。',
+    characters: ['林玄', '张宸'],
+    retainedPlotPoints: ['酒精擦屏', '保研反转'], omittedContent: ['重复说教'],
+    scenes: [
+      { title: '擦屏冲突', narrativeRole: '开场钩子', estimatedDurationSec: 45, retainedHighlights: ['酒精擦屏'], script: '宿舍，夜。张宸举起酒精瓶嘲笑林玄。林玄按住电脑：“镀膜会坏。”张宸甩开他的手，当众擦满屏幕。林玄停手，不再劝阻。' },
+      { title: '结果兑现', narrativeRole: '高潮', estimatedDurationSec: 60, retainedHighlights: ['保研公布'], script: '三年后，保研名单公布。林玄位列第一，张宸落选。张宸盯着斑驳屏幕质问原因，林玄把当年的警告重新说给他听。张宸沉默。' },
+    ],
+  }, 2);
+  assert.equal(adapted.scenes.length, 2);
+  assert.equal(adapted.scenes[0].episodeNumber, 2);
+  assert.equal(adapted.scenes[0].splitReason, 'adapted');
+  assert.equal(adapted.estimatedTotalDurationSec, 105);
 
   const dialogueOnly = analyzeScript('林晓：“你为什么不告诉我？”父亲：“这不重要。”');
   assert.equal(dialogueOnly.issues.filter((issue) => issue.type === 'weak_action').length, 0);
