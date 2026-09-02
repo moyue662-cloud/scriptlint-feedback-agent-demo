@@ -179,7 +179,7 @@ const { normalizeNovelAdaptation } = adaptationModule;
   assert.ok(modelLike.beats.every((beat) => !beat.action.includes('等待其反应')));
 
   const rosterAndPerformance = normalizeAnalysisResult({
-    characters: ['林玄', '张宸'], score: 60, executionPrompt: '',
+    characters: ['林玄, 张宸'], score: 60, executionPrompt: '',
     beats: [{
       id: 'B01', source: '辅导员贴出名单。', actor: '辅导员', receiver: '林玄',
       trigger: '名单公布', goal: '公布结果', action: '抬手把名单贴在公告栏上', dialogue: '',
@@ -192,6 +192,7 @@ const { normalizeNovelAdaptation } = adaptationModule;
     ],
   }, '辅导员贴出名单。林玄抬眼确认名字后点头。');
   assert.ok(rosterAndPerformance.characters.includes('辅导员'));
+  assert.deepEqual(rosterAndPerformance.characters, ['林玄', '张宸', '辅导员']);
   assert.ok(rosterAndPerformance.issues.every((issue) => issue.resolved));
 
 console.log('cross-scene regression checks passed');

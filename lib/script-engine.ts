@@ -315,7 +315,8 @@ export function normalizeAnalysisResult(
   const characters = [...new Set([
     ...(Array.isArray(result.characters) ? result.characters : []),
     ...beats.flatMap((beat) => [beat.actor, beat.receiver]),
-  ].map((name) => typeof name === 'string' ? name.trim() : '').filter((name) => name && !placeholderCharacters.test(name)))].slice(0, 12);
+  ].flatMap((name) => typeof name === 'string' ? name.split(/[、,，/／]+/) : [])
+    .map((name) => name.trim()).filter((name) => name && !placeholderCharacters.test(name)))].slice(0, 12);
   const adjustedWeakIssues = modelIssues
     .filter((issue) => issue.type === 'weak_action')
     .map((issue) => {
