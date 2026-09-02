@@ -68,7 +68,7 @@ const actionWords = [
   '吸气', '呼吸', '停顿', '开口', '说', '喊', '哭', '笑', '沉默', '摩挲',
 ];
 
-const genericActionPattern = /保持当前站位，把注意力转向对方，等待其反应|等待其反应|等待对方反应/;
+const genericActionPattern = /保持当前站位，把注意力转向对方，等待其反应|等待(?:其|对方)?(?:反应|回应)/;
 
 const characterStopWords = new Set([
   '原始剧本', '客厅', '晚上', '夜晚', '随后', '突然', '因为', '但是',
