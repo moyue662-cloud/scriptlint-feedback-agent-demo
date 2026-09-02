@@ -9,6 +9,7 @@ const { module: aiReviewModule } = await runnerImport(path.resolve('lib/episode-
 const { module: batchImportModule } = await runnerImport(path.resolve('lib/batch-import.ts'), loadOptions);
 const { module: scriptEngineModule } = await runnerImport(path.resolve('lib/script-engine.ts'), loadOptions);
 const { module: adaptationModule } = await runnerImport(path.resolve('lib/novel-adaptation.ts'), loadOptions);
+const { module: scriptInputModule } = await runnerImport(path.resolve('lib/script-input.ts'), loadOptions);
 
 const { buildEpisodeReview } = episodeModule;
 const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
@@ -16,6 +17,7 @@ const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
 const { splitScriptIntoScenes } = batchImportModule;
 const { analyzeScript, normalizeAnalysisResult } = scriptEngineModule;
 const { buildAdaptationCompileContext, normalizeNovelAdaptation } = adaptationModule;
+const { assessScriptInput } = scriptInputModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -140,6 +142,13 @@ const { buildAdaptationCompileContext, normalizeNovelAdaptation } = adaptationMo
   assert.ok(unpunctuated.length > 1);
   assert.ok(unpunctuated.length <= 24);
   assert.ok(unpunctuated.every((draft) => draft.script.length <= 980));
+
+  const narrativeAssessment = assessScriptInput('我给你终极四合一完整版：都市修仙 + 酒精屏幕因果 + 舍友偷卷翻车 + 保研碾压！全篇逻辑闭环，结局彻底封神。我叫林玄，上古仙尊残魂入世，封印修为蛰伏凡尘。他的室友张宸是典型的伪天才，后来两人的命运彻底逆转。');
+  assert.equal(narrativeAssessment.shouldAdaptFirst, true);
+  assert.equal(narrativeAssessment.kind, 'narrative');
+  const sceneAssessment = assessScriptInput('客厅，夜晚。\n林晓：你什么时候辞职的？\n父亲：这不重要。\n林晓把通知书拍在桌上，父亲停下收拾茶杯的动作。');
+  assert.equal(sceneAssessment.shouldAdaptFirst, false);
+  assert.equal(sceneAssessment.kind, 'scene');
 
   const adapted = normalizeNovelAdaptation({
     theme: '敬畏细节', logline: '林玄守住细节，张宸因狂妄失去机会。',

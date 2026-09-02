@@ -22,6 +22,7 @@ import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-revi
 import { passesEpisodeAIReviewGate, type EpisodeAIReview } from '@/lib/episode-ai-review';
 import { splitScriptIntoScenes, type ImportedSceneDraft } from '@/lib/batch-import';
 import { buildAdaptationCompileContext, type AdaptationCompileContext, type NovelAdaptationResult } from '@/lib/novel-adaptation';
+import { assessScriptInput } from '@/lib/script-input';
 import { EVAL_CASES, evaluateCase, summarizeEvaluation, type EvaluationSummary } from '@/lib/eval-suite';
 import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState } from '@/lib/scene-state';
 import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, SceneVersionSummary, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
@@ -574,7 +575,8 @@ export default function Home() {
   const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating || isBatchAdapting;
   const localStructureEstimate = useMemo(() => script.trim() ? analyzeScript(script).beats.length : 0, [script]);
   const sceneDraftEstimate = useMemo(() => script.trim() ? splitScriptIntoScenes(script, episodeNumber) : [], [script, episodeNumber]);
-  const shouldSuggestBatchImport = localStructureEstimate > 30 || sceneDraftEstimate.length > 1 || script.length > 6000;
+  const scriptInputAssessment = useMemo(() => assessScriptInput(script), [script]);
+  const shouldSuggestBatchImport = scriptInputAssessment.shouldAdaptFirst || localStructureEstimate > 30 || sceneDraftEstimate.length > 1 || script.length > 6000;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -708,9 +710,11 @@ export default function Home() {
     setBatchImportText(script);
     setBatchAdaptation(null);
     setAdaptationCompileContext(null);
-    setBatchDrafts(splitScriptIntoScenes(script, episodeNumber));
+    setBatchDrafts(scriptInputAssessment.shouldAdaptFirst ? [] : splitScriptIntoScenes(script, episodeNumber));
     setActiveTab('states');
-    setNotice(`当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，已先合并为 ${sceneDraftEstimate.length} 个原文场景草稿` : ''}。如果输入是小说，请优先点击“AI精简并拆场”，再逐场编译。`);
+    setNotice(scriptInputAssessment.shouldAdaptFirst
+      ? `系统判断这段内容更像小说、人物设定或故事梗概（${scriptInputAssessment.reasons.join('；')}）。已转到改编区，请点击“AI精简并拆场”，不要直接当作单场戏编译。`
+      : `当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，已先合并为 ${sceneDraftEstimate.length} 个原文场景草稿` : ''}。请确认场界后逐场编译。`);
   }
 
   async function requestAI(body: Record<string, unknown>) {
@@ -1368,8 +1372,8 @@ export default function Home() {
                 )}
                 {shouldSuggestBatchImport && (
                   <div className="mt-3 flex flex-col justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5 text-xs leading-5 text-sky-900 sm:flex-row sm:items-center">
-                    <div><p className="font-semibold">这段内容可能不止一场戏</p><p className="mt-0.5">当前检测到约 {localStructureEstimate} 个结构单元。单场编译更稳定，建议先按场次拆分；系统不会把这个估算值当成剧本事实。</p></div>
-                    <Button size="sm" variant="outline" onClick={routeLongScriptToBatchImport} disabled={busy}><GitBranch data-icon="inline-start" />转到批量拆场</Button>
+                    <div><p className="font-semibold">{scriptInputAssessment.shouldAdaptFirst ? '这段内容更像小说或故事梗概' : '这段内容可能不止一场戏'}</p><p className="mt-0.5">{scriptInputAssessment.shouldAdaptFirst ? `检测依据：${scriptInputAssessment.reasons.join('；')}。请先压缩主线并转换为完整场景。` : `当前检测到约 ${localStructureEstimate} 个结构单元。单场编译更稳定，建议先按场次拆分；系统不会把这个估算值当成剧本事实。`}</p></div>
+                    <Button size="sm" variant="outline" onClick={routeLongScriptToBatchImport} disabled={busy}><GitBranch data-icon="inline-start" />{scriptInputAssessment.shouldAdaptFirst ? '转到精简改编' : '转到批量拆场'}</Button>
                   </div>
                 )}
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
@@ -1379,11 +1383,11 @@ export default function Home() {
                   <div className="flex flex-wrap gap-2">
                     <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || busy} className="px-4">
                       {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
-                      {isRunning ? '智能编译中…' : shouldSuggestBatchImport ? '先拆分场次' : 'AI 编译这场戏'}
+                      {isRunning ? '智能编译中…' : scriptInputAssessment.shouldAdaptFirst ? '先精简改编' : shouldSuggestBatchImport ? '先拆分场次' : 'AI 编译这场戏'}
                     </Button>
                     <Button size="lg" variant="outline" onClick={runFullPipeline} disabled={!script.trim() || busy} className="px-4">
                       {isPipelineRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Sparkles data-icon="inline-start" />}
-                      {isPipelineRunning ? '全流程运行中…' : shouldSuggestBatchImport ? '先拆分再运行' : '运行全流程'}
+                      {isPipelineRunning ? '全流程运行中…' : scriptInputAssessment.shouldAdaptFirst ? '先精简再运行' : shouldSuggestBatchImport ? '先拆分再运行' : '运行全流程'}
                     </Button>
                   </div>
                 </div>
