@@ -1,4 +1,4 @@
-import { analyzeScript, type AnalysisResult } from '@/lib/script-engine';
+import { analyzeScript, normalizeAnalysisResult, type AnalysisResult } from '@/lib/script-engine';
 import { getEpisodeSummary, getLatestScene, getPreviousScene } from '@/lib/scene-db';
 import { sceneContinuityContext } from '@/lib/scene-state';
 
@@ -258,7 +258,12 @@ export async function POST(request: Request) {
     const outputText = getOutputText(payload);
     if (!outputText) return Response.json({ error: '模型没有返回可用的结构化结果。' }, { status: 502 });
     const parsedResult = parseStructuredOutput(outputText);
-    const beatCheck = enforceBeatCompleteness(parsedResult, script);
+    // Keep the model's narrative decisions, but deterministically repair the
+    // execution-critical fields before they reach the UI. In analyze mode we
+    // rebuild weak-action findings from the normalized beats; in repair mode
+    // we preserve the model's resolved/unresolved status for the current loop.
+    const normalizedResult = normalizeAnalysisResult(parsedResult, script, !isRepair);
+    const beatCheck = enforceBeatCompleteness(normalizedResult, script);
     const result = beatCheck.result;
 
     return Response.json({

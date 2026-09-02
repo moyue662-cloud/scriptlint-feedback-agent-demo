@@ -7,11 +7,13 @@ const { module: episodeModule } = await runnerImport(path.resolve('lib/episode-r
 const { module: stateModule } = await runnerImport(path.resolve('lib/scene-state.ts'), loadOptions);
 const { module: aiReviewModule } = await runnerImport(path.resolve('lib/episode-ai-review.ts'), loadOptions);
 const { module: batchImportModule } = await runnerImport(path.resolve('lib/batch-import.ts'), loadOptions);
+const { module: scriptEngineModule } = await runnerImport(path.resolve('lib/script-engine.ts'), loadOptions);
 
 const { buildEpisodeReview } = episodeModule;
 const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
 const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
 const { splitScriptIntoScenes } = batchImportModule;
+const { analyzeScript, normalizeAnalysisResult } = scriptEngineModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -134,5 +136,25 @@ const { splitScriptIntoScenes } = batchImportModule;
   const unpunctuated = splitScriptIntoScenes('超长无标点文本'.repeat(1300));
   assert.ok(unpunctuated.length > 1);
   assert.ok(unpunctuated.every((draft) => draft.script.length <= 1800));
+
+  const dialogueOnly = analyzeScript('林晓：“你为什么不告诉我？”父亲：“这不重要。”');
+  assert.equal(dialogueOnly.issues.filter((issue) => issue.type === 'weak_action').length, 0);
+  assert.ok(dialogueOnly.beats.every((beat) => beat.action.includes('说出这句话') || beat.action.includes('追问') || beat.action.includes('解释')));
+
+  const emotionOnly = analyzeScript('林晓怀疑父亲。父亲尴尬。林晓继续追问。');
+  const emotionWeakIssues = emotionOnly.issues.filter((issue) => issue.type === 'weak_action');
+  assert.equal(emotionWeakIssues.length, 2);
+  assert.ok(emotionWeakIssues.every((issue) => !issue.suggestion.includes('等待其反应')));
+
+  const modelLike = normalizeAnalysisResult({
+    characters: ['林晓', '父亲'], score: 90, executionPrompt: '',
+    beats: dialogueOnly.beats.map((beat) => ({ ...beat, action: '保持当前站位，把注意力转向对方，等待其反应' })),
+    issues: dialogueOnly.beats.map((beat, index) => ({
+      id: `M${index + 1}`, severity: 'soft', type: 'weak_action', targetId: beat.id,
+      title: '缺少明确的可执行动作', detail: '模型重复提示', suggestion: '补充动作：等待其反应', resolved: false,
+    })),
+  }, '林晓：“你为什么不告诉我？”父亲：“这不重要。”');
+  assert.equal(modelLike.issues.filter((issue) => issue.type === 'weak_action').length, 0);
+  assert.ok(modelLike.beats.every((beat) => !beat.action.includes('等待其反应')));
 
 console.log('cross-scene regression checks passed');
