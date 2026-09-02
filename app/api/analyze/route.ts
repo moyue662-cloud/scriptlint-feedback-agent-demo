@@ -1,6 +1,7 @@
 import { analyzeScript, normalizeAnalysisResult, type AnalysisResult } from '@/lib/script-engine';
 import { getEpisodeSummary, getLatestScene, getPreviousScene } from '@/lib/scene-db';
 import { sceneContinuityContext } from '@/lib/scene-state';
+import type { AdaptationCompileContext } from '@/lib/novel-adaptation';
 
 export const runtime = 'edge';
 
@@ -83,6 +84,8 @@ const instructions = `你是短剧交互编译器，不是自由改写作者。�
 8. executionPrompt 要完整列出修正后的节拍，并约束后续分镜模型保持人物、道具、空间和因果连续。
 9. 如果提供“上一场状态”，必须默认继承人物情绪、知情信息、道具、空间与时间；若新剧本开场与其冲突且没有明确变化过程，添加 hard continuity 问题并给出补桥建议。
 10. 仅输出符合下方 JSON Schema 的数据；禁止 Markdown 代码块、注释、未加双引号的键和尾随逗号。
+11. 如果提供“改编衔接上下文”，全局人物表及前场已建立事实是人物认知判断的依据；不得把已经建立的信息误报为 knowledge_risk，也不得使用尚未出现的未来事实。
+12. 当前场列出的出场人物必须进入 characters；每次语言或动作刺激都要在同一节拍给出承接反应和回应。若正文有时间跳跃，必须用明确时间标记建立过渡。
 
 JSON Schema：
 ${JSON.stringify(analysisSchema)}`;
@@ -177,6 +180,7 @@ export async function POST(request: Request) {
       episodeNumber?: number;
       projectId?: string;
       sceneId?: string;
+      adaptationContext?: AdaptationCompileContext;
     };
     const script = body.script?.trim() ?? '';
     if (!script) return Response.json({ error: '请输入剧本后再分析。' }, { status: 400 });
@@ -213,11 +217,37 @@ export async function POST(request: Request) {
           notes: episodeSummary.notes,
         })}`
       : '';
+    const cleanContextText = (value: unknown, limit: number) => typeof value === 'string' ? value.trim().slice(0, limit) : '';
+    const cleanContextList = (value: unknown, limit: number) => Array.isArray(value)
+      ? value.map((item) => cleanContextText(item, 160)).filter(Boolean).slice(0, limit)
+      : [];
+    const cleanSceneContext = (scene: unknown) => {
+      const value = scene && typeof scene === 'object' ? scene as Record<string, unknown> : {};
+      return {
+        title: cleanContextText(value.title, 80),
+        narrativeRole: cleanContextText(value.narrativeRole, 30),
+        retainedHighlights: cleanContextList(value.retainedHighlights, 4),
+        appearingCharacters: cleanContextList(value.appearingCharacters, 8),
+        establishedFacts: cleanContextList(value.establishedFacts, 6),
+        timeMarker: cleanContextText(value.timeMarker, 40),
+      };
+    };
+    const rawAdaptationContext = body.adaptationContext;
+    const adaptationContext = rawAdaptationContext && typeof rawAdaptationContext === 'object' ? {
+      theme: cleanContextText(rawAdaptationContext.theme, 200),
+      logline: cleanContextText(rawAdaptationContext.logline, 400),
+      globalCharacters: cleanContextList(rawAdaptationContext.globalCharacters, 12),
+      currentScene: cleanSceneContext(rawAdaptationContext.currentScene),
+      priorScenes: Array.isArray(rawAdaptationContext.priorScenes) ? rawAdaptationContext.priorScenes.slice(-5).map(cleanSceneContext) : [],
+    } : null;
+    const adaptationContextText = adaptationContext
+      ? `\n\n改编衔接上下文（人物表与已建立事实可用于消除误报，但不能覆盖当前场正文）：\n${JSON.stringify(adaptationContext)}`
+      : '';
 
     const isRepair = body.mode === 'repair' && body.current;
     const input = isRepair
-      ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}${continuityContext}${episodeSummaryContext}`
-      : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。${continuityContext}${episodeSummaryContext}\n\n当前场原始剧本：\n${script}`;
+      ? `执行第 ${Math.max(1, body.loopCount ?? 1)} 轮受控修复。只修复 currentResult 中 resolved=false 的问题；不要重写无关节拍，不改变核心剧情。修复后将相应问题标为 resolved=true；如果无法安全修复则保留 false 并说明原因。\n\n原始剧本：\n${script}\n\ncurrentResult：\n${JSON.stringify(body.current)}${continuityContext}${episodeSummaryContext}${adaptationContextText}`
+      : `分析并编译下面这场短剧。保留原意，但把含糊的情绪和交互补成可拍摄的因果链。${continuityContext}${episodeSummaryContext}${adaptationContextText}\n\n当前场原始剧本：\n${script}`;
 
     let modelResponse: Response;
     try {

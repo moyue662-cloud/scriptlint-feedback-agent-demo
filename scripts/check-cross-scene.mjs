@@ -146,14 +146,16 @@ const { normalizeNovelAdaptation } = adaptationModule;
     characters: ['林玄', '张宸'],
     retainedPlotPoints: ['酒精擦屏', '保研反转'], omittedContent: ['重复说教'],
     scenes: [
-      { title: '擦屏冲突', narrativeRole: '开场钩子', estimatedDurationSec: 45, retainedHighlights: ['酒精擦屏'], script: '宿舍，夜。张宸举起酒精瓶嘲笑林玄。林玄按住电脑：“镀膜会坏。”张宸甩开他的手，当众擦满屏幕。林玄停手，不再劝阻。' },
-      { title: '结果兑现', narrativeRole: '高潮', estimatedDurationSec: 60, retainedHighlights: ['保研公布'], script: '三年后，保研名单公布。林玄位列第一，张宸落选。张宸盯着斑驳屏幕质问原因，林玄把当年的警告重新说给他听。张宸沉默。' },
+      { title: '擦屏冲突', narrativeRole: '开场钩子', estimatedDurationSec: 45, retainedHighlights: ['酒精擦屏'], appearingCharacters: ['林玄', '张宸'], establishedFacts: ['林玄警告酒精会损伤镀膜'], timeMarker: '大一开学夜', script: '大一开学夜，宿舍。张宸举起酒精瓶嘲笑林玄。林玄按住电脑：“镀膜会坏。”张宸甩开他的手，当众擦满屏幕。林玄停手，不再劝阻。' },
+      { title: '结果兑现', narrativeRole: '高潮', estimatedDurationSec: 60, retainedHighlights: ['保研公布'], appearingCharacters: ['林玄', '张宸', '辅导员'], establishedFacts: ['林玄保研第一', '张宸落选'], timeMarker: '三年后', script: '三年后，保研名单公布。辅导员贴出名单，林玄位列第一，张宸落选。张宸盯着斑驳屏幕质问原因，林玄把当年的警告重新说给他听。张宸沉默。' },
     ],
   }, 2);
   assert.equal(adapted.scenes.length, 2);
   assert.equal(adapted.scenes[0].episodeNumber, 2);
   assert.equal(adapted.scenes[0].splitReason, 'adapted');
   assert.equal(adapted.estimatedTotalDurationSec, 105);
+  assert.deepEqual(adapted.scenes[1].appearingCharacters, ['林玄', '张宸', '辅导员']);
+  assert.equal(adapted.scenes[1].timeMarker, '三年后');
 
   const dialogueOnly = analyzeScript('林晓：“你为什么不告诉我？”父亲：“这不重要。”');
   assert.equal(dialogueOnly.issues.filter((issue) => issue.type === 'weak_action').length, 0);
@@ -175,5 +177,21 @@ const { normalizeNovelAdaptation } = adaptationModule;
   }, '林晓：“你为什么不告诉我？”父亲：“这不重要。”');
   assert.equal(modelLike.issues.filter((issue) => issue.type === 'weak_action').length, 0);
   assert.ok(modelLike.beats.every((beat) => !beat.action.includes('等待其反应')));
+
+  const rosterAndPerformance = normalizeAnalysisResult({
+    characters: ['林玄', '张宸'], score: 60, executionPrompt: '',
+    beats: [{
+      id: 'B01', source: '辅导员贴出名单。', actor: '辅导员', receiver: '林玄',
+      trigger: '名单公布', goal: '公布结果', action: '抬手把名单贴在公告栏上', dialogue: '',
+      reaction: '林玄抬眼确认自己的名字', response: '林玄点头并退到一旁', stateBefore: '等待', stateAfter: '确认',
+    }],
+    issues: [
+      { id: 'R1', severity: 'soft', type: 'missing_character', targetId: 'B01', title: '辅导员角色未在characters中列出', detail: '辅导员在b1中出现，但characters数组未包含该角色。', suggestion: '补入人物表', resolved: false },
+      { id: 'R2', severity: 'soft', type: 'abstract_emotion', targetId: 'B01', title: '内心独白中的抽象情绪', detail: '需要转为动作', suggestion: '补动作', resolved: false },
+      { id: 'R3', severity: 'soft', type: 'missing_response', targetId: 'B01', title: '回应缺失', detail: '需要回应', suggestion: '补回应', resolved: false },
+    ],
+  }, '辅导员贴出名单。林玄抬眼确认名字后点头。');
+  assert.ok(rosterAndPerformance.characters.includes('辅导员'));
+  assert.ok(rosterAndPerformance.issues.every((issue) => issue.resolved));
 
 console.log('cross-scene regression checks passed');

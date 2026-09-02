@@ -25,8 +25,11 @@ const schema = {
           script: { type: 'string' },
           estimatedDurationSec: { type: 'integer', minimum: 20, maximum: 120 },
           retainedHighlights: { type: 'array', items: { type: 'string' }, maxItems: 4 },
+          appearingCharacters: { type: 'array', items: { type: 'string' }, maxItems: 8 },
+          establishedFacts: { type: 'array', items: { type: 'string' }, maxItems: 6 },
+          timeMarker: { type: 'string' },
         },
-        required: ['title', 'narrativeRole', 'script', 'estimatedDurationSec', 'retainedHighlights'],
+        required: ['title', 'narrativeRole', 'script', 'estimatedDurationSec', 'retainedHighlights', 'appearingCharacters', 'establishedFacts', 'timeMarker'],
       },
     },
   },
@@ -44,7 +47,11 @@ const instructions = `你是“小说转AI短剧”的改编编辑。输入可�
 6. 通常输出 4–10 场；内容很短时可 2–3 场，内容复杂时最多 16 场。每场建议 20–120 秒、约 100–450 个中文字符，后续分镜系统会再拆成多个镜头。
 7. 不新增与原文无关的人物、设定或支线；允许合并功能重复的事件和次要人物，但要在 omittedContent 中说明。
 8. script 是可以继续交给“交互节拍编译器”的改编场景正文，不是创作建议，也不是摘要。
-9. 仅输出 JSON 对象，不要 Markdown、解释文字或代码块。
+9. 每场都列出实际出场人物 appearingCharacters；实体人物一旦在动作或台词中出现，必须同时列入全局 characters。广播、群通知、手机消息不作为实体角色出场。
+10. 每场列出截至该场结束、已经通过画面或台词建立的 establishedFacts。人物只能使用本场或更早场次已经建立的信息，不能提前知道后续事实。
+11. 发生时间跳跃时，timeMarker 必须写明确时间词（如“三个月后”“毕业季”“名单公布当日”），并把它放在 script 开头；没有跳时填空字符串。
+12. 每次嘲讽、质问、推搡、递交物品或重大信息揭示，都必须在同场给出对方的即时可见反应或简短回应；内心状态必须同时落成呼吸、视线、手部、站姿或距离变化。
+13. 仅输出 JSON 对象，不要 Markdown、解释文字或代码块。
 
 JSON Schema：
 ${JSON.stringify(schema)}`;

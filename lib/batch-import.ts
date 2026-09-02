@@ -6,6 +6,9 @@ export interface ImportedSceneDraft {
   estimatedDurationSec?: number;
   narrativeRole?: string;
   retainedHighlights?: string[];
+  appearingCharacters?: string[];
+  establishedFacts?: string[];
+  timeMarker?: string;
 }
 
 const headingPattern = /^(?:(?:第\s*)?(\d{1,3})\s*[场镜幕](?:(?:\s*[:：\-—]\s*|\s+).*)?|场景\s*(\d{1,3})(?:(?:\s*[:：\-—]\s*|\s+).*)?|场次\s*(\d{1,3})(?:(?:\s*[:：\-—]\s*|\s+).*)?|(?:INT\.?|EXT\.?)(?:[ .：:].*)|(?:内景|外景)[：:].*)$/i;

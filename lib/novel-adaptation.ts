@@ -11,6 +11,26 @@ export interface NovelAdaptationResult {
   source: 'ai';
 }
 
+export interface AdaptationCompileContext {
+  theme: string;
+  logline: string;
+  globalCharacters: string[];
+  currentScene: {
+    title: string;
+    narrativeRole?: string;
+    retainedHighlights: string[];
+    appearingCharacters: string[];
+    establishedFacts: string[];
+    timeMarker?: string;
+  };
+  priorScenes: Array<{
+    title: string;
+    retainedHighlights: string[];
+    establishedFacts: string[];
+    timeMarker?: string;
+  }>;
+}
+
 export interface RawNovelAdaptation {
   theme: string;
   logline: string;
@@ -23,6 +43,9 @@ export interface RawNovelAdaptation {
     script: string;
     estimatedDurationSec: number;
     retainedHighlights: string[];
+    appearingCharacters: string[];
+    establishedFacts: string[];
+    timeMarker: string;
   }>;
 }
 
@@ -46,6 +69,9 @@ export function normalizeNovelAdaptation(raw: RawNovelAdaptation, episodeNumber 
         estimatedDurationSec: Math.max(20, Math.min(120, Math.round(Number(scene?.estimatedDurationSec) || 45))),
         narrativeRole: cleanText(scene?.narrativeRole, '情节推进').slice(0, 24),
         retainedHighlights: cleanList(scene?.retainedHighlights, 4),
+        appearingCharacters: cleanList(scene?.appearingCharacters, 8),
+        establishedFacts: cleanList(scene?.establishedFacts, 6),
+        timeMarker: cleanText(scene?.timeMarker).slice(0, 40) || undefined,
       };
     })
     .filter((scene): scene is ImportedSceneDraft => Boolean(scene))

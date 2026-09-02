@@ -66,6 +66,7 @@ const actionWords = [
   '抬头', '低头', '转身', '质问', '追问', '解释', '回答', '避开', '看向',
   '盯', '攥', '握', '抓', '松开', '靠近', '后退', '迈', '点头', '摇头',
   '吸气', '呼吸', '停顿', '开口', '说', '喊', '哭', '笑', '沉默', '摩挲',
+  '贴', '递', '指', '按', '敲', '翻', '撕', '摔', '端', '举', '收回', '伸出',
 ];
 
 const genericActionPattern = /保持当前站位，把注意力转向对方，等待其反应|等待(?:其|对方)?(?:反应|回应)/;
@@ -310,6 +311,11 @@ export function normalizeAnalysisResult(
 
   const modelIssues = Array.isArray(result.issues) ? result.issues : [];
   const beatById = new Map(beats.map((beat) => [beat.id, beat]));
+  const placeholderCharacters = /^(?:对方|角色A|角色B|未知人物|众人|群体|旁白)$/;
+  const characters = [...new Set([
+    ...(Array.isArray(result.characters) ? result.characters : []),
+    ...beats.flatMap((beat) => [beat.actor, beat.receiver]),
+  ].map((name) => typeof name === 'string' ? name.trim() : '').filter((name) => name && !placeholderCharacters.test(name)))].slice(0, 12);
   const adjustedWeakIssues = modelIssues
     .filter((issue) => issue.type === 'weak_action')
     .map((issue) => {
@@ -318,15 +324,41 @@ export function normalizeAnalysisResult(
         ?? (numericTarget ? beats[Number(numericTarget) - 1] : undefined);
       return beat ? { ...issue, suggestion: `补充动作：${beat.action}` } : issue;
     });
-  const preservedIssues = modelIssues.filter((issue) => issue.type !== 'weak_action');
+  const preservedIssues = modelIssues.filter((issue) => issue.type !== 'weak_action').map((issue) => {
+    const numericTarget = issue.targetId.match(/(\d+)$/)?.[1];
+    const beat = beatById.get(issue.targetId)
+      ?? (numericTarget ? beats[Number(numericTarget) - 1] : undefined);
+    const rosterOnly = issue.type === 'missing_character'
+      && /characters|角色.*(?:未|不在|缺少)|未在.*列出|数组.*不包含/i.test(`${issue.title}${issue.detail}`);
+    if (rosterOnly && characters.length >= 2) return {
+      ...issue,
+      detail: '系统已根据节拍中的行动者和承接者自动同步人物表。',
+      suggestion: '已自动补入人物表，无需人工处理。',
+      resolved: true,
+    };
+    if (issue.type === 'abstract_emotion' && beat && hasConcreteAction(beat.action)) return {
+      ...issue,
+      detail: `抽象情绪已落实为可拍摄动作：${beat.action}`,
+      suggestion: `已使用动作表达：${beat.action}`,
+      resolved: true,
+    };
+    if (issue.type === 'missing_response' && beat && beat.reaction.trim() && beat.response.trim()) return {
+      ...issue,
+      detail: `已补全承接反应与回应：${beat.reaction}；${beat.response}`,
+      suggestion: '已补全，无需人工处理。',
+      resolved: true,
+    };
+    return issue;
+  });
   const weakIssues = beats
-    .filter((beat) => !actionWords.some((word) => beat.source.includes(word)) && !beat.dialogue)
+    .filter((beat) => !hasConcreteAction(beat.action) && !beat.dialogue)
     .map((beat, index) => weakActionIssue(beat, `LOCAL-W${String(index + 1).padStart(2, '0')}`));
   const issues = [...preservedIssues, ...(rebuildWeakIssues ? weakIssues : adjustedWeakIssues)];
   const hardCount = issues.filter((issue) => issue.severity === 'hard' && !issue.resolved).length;
   const softCount = issues.filter((issue) => issue.severity === 'soft' && !issue.resolved).length;
   return {
     ...result,
+    characters,
     beats,
     issues,
     score: Math.max(35, Math.min(98, 96 - hardCount * 18 - softCount * 5)),
