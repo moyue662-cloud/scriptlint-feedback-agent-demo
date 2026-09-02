@@ -1336,11 +1336,11 @@ export default function Home() {
                   <div className="flex flex-wrap gap-2">
                     <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || busy} className="px-4">
                       {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
-                      {isRunning ? '智能编译中…' : 'AI 编译这场戏'}
+                      {isRunning ? '智能编译中…' : shouldSuggestBatchImport ? '先拆分场次' : 'AI 编译这场戏'}
                     </Button>
                     <Button size="lg" variant="outline" onClick={runFullPipeline} disabled={!script.trim() || busy} className="px-4">
                       {isPipelineRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Sparkles data-icon="inline-start" />}
-                      {isPipelineRunning ? '全流程运行中…' : '运行全流程'}
+                      {isPipelineRunning ? '全流程运行中…' : shouldSuggestBatchImport ? '先拆分再运行' : '运行全流程'}
                     </Button>
                   </div>
                 </div>
