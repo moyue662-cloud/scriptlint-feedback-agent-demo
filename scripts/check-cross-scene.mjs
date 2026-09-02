@@ -15,7 +15,7 @@ const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
 const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
 const { splitScriptIntoScenes } = batchImportModule;
 const { analyzeScript, normalizeAnalysisResult } = scriptEngineModule;
-const { normalizeNovelAdaptation } = adaptationModule;
+const { buildAdaptationCompileContext, normalizeNovelAdaptation } = adaptationModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -156,6 +156,19 @@ const { normalizeNovelAdaptation } = adaptationModule;
   assert.equal(adapted.estimatedTotalDurationSec, 105);
   assert.deepEqual(adapted.scenes[1].appearingCharacters, ['林玄', '张宸', '辅导员']);
   assert.equal(adapted.scenes[1].timeMarker, '三年后');
+  const secondContext = buildAdaptationCompileContext(adapted, adapted.scenes[1]);
+  assert.deepEqual(secondContext.priorScenes.flatMap((scene) => scene.establishedFacts), ['林玄警告酒精会损伤镀膜']);
+  assert.deepEqual(secondContext.currentScene.factsToEstablish, ['林玄保研第一', '张宸落选']);
+  assert.equal(secondContext.priorScenes.some((scene) => scene.establishedFacts.includes('林玄保研第一')), false);
+
+  const prefixedTime = normalizeNovelAdaptation({
+    theme: '时间测试', logline: '时间标记必须进入正文。', characters: ['甲', '乙'], retainedPlotPoints: [], omittedContent: [],
+    scenes: [
+      { title: '前场', narrativeRole: '开场钩子', estimatedDurationSec: 30, retainedHighlights: [], appearingCharacters: ['甲', '乙'], establishedFacts: [], timeMarker: '', script: '甲把信封递给乙，乙接过信封后拆开，抬眼询问信件来源。甲避开目光，只让乙继续读完再说。' },
+      { title: '后场', narrativeRole: '收束', estimatedDurationSec: 30, retainedHighlights: [], appearingCharacters: ['甲', '乙'], establishedFacts: [], timeMarker: '两个月后', script: '甲在车站拦住乙，把已经磨损的信封重新递过去。乙没有接，转身望向进站列车。甲收回信封，站在原地目送乙登上列车。' },
+    ],
+  });
+  assert.ok(prefixedTime.scenes[1].script.startsWith('两个月后。'));
 
   const dialogueOnly = analyzeScript('林晓：“你为什么不告诉我？”父亲：“这不重要。”');
   assert.equal(dialogueOnly.issues.filter((issue) => issue.type === 'weak_action').length, 0);
@@ -194,5 +207,16 @@ const { normalizeNovelAdaptation } = adaptationModule;
   assert.ok(rosterAndPerformance.characters.includes('辅导员'));
   assert.deepEqual(rosterAndPerformance.characters, ['林玄', '张宸', '辅导员']);
   assert.ok(rosterAndPerformance.issues.every((issue) => issue.resolved));
+
+  const placeholderResponse = normalizeAnalysisResult({
+    characters: ['甲', '乙'], score: 70, executionPrompt: '',
+    beats: [{
+      id: 'B01', source: '甲把信封递给乙。', actor: '甲', receiver: '乙', trigger: '甲取出信封', goal: '让乙查看内容',
+      action: '甲伸手把信封递到乙面前', dialogue: '', reaction: '乙低头看向信封', response: '以接下来的行动回应', stateBefore: '戒备', stateAfter: '迟疑',
+    }],
+    issues: [{ id: 'P1', severity: 'soft', type: 'missing_response', targetId: 'B01', title: '回应缺失', detail: '占位回应不可拍', suggestion: '补充回应', resolved: false }],
+  }, '甲把信封递给乙。');
+  assert.equal(placeholderResponse.beats[0].response.includes('以接下来的行动回应'), false);
+  assert.equal(placeholderResponse.issues[0].resolved, true);
 
 console.log('cross-scene regression checks passed');

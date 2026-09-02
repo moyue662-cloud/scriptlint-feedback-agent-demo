@@ -20,7 +20,7 @@ export interface AdaptationCompileContext {
     narrativeRole?: string;
     retainedHighlights: string[];
     appearingCharacters: string[];
-    establishedFacts: string[];
+    factsToEstablish: string[];
     timeMarker?: string;
   };
   priorScenes: Array<{
@@ -29,6 +29,34 @@ export interface AdaptationCompileContext {
     establishedFacts: string[];
     timeMarker?: string;
   }>;
+}
+
+export function buildAdaptationCompileContext(
+  adaptation: NovelAdaptationResult | null,
+  draft: ImportedSceneDraft,
+): AdaptationCompileContext | null {
+  if (!adaptation) return null;
+  const sceneIndex = adaptation.scenes.findIndex((scene) => scene === draft || (scene.title === draft.title && scene.script === draft.script));
+  if (sceneIndex < 0) return null;
+  return {
+    theme: adaptation.theme,
+    logline: adaptation.logline,
+    globalCharacters: adaptation.characters,
+    currentScene: {
+      title: draft.title,
+      narrativeRole: draft.narrativeRole,
+      retainedHighlights: draft.retainedHighlights ?? [],
+      appearingCharacters: draft.appearingCharacters ?? [],
+      factsToEstablish: draft.establishedFacts ?? [],
+      timeMarker: draft.timeMarker,
+    },
+    priorScenes: adaptation.scenes.slice(Math.max(0, sceneIndex - 5), sceneIndex).map((scene) => ({
+      title: scene.title,
+      retainedHighlights: scene.retainedHighlights ?? [],
+      establishedFacts: scene.establishedFacts ?? [],
+      timeMarker: scene.timeMarker,
+    })),
+  };
 }
 
 export interface RawNovelAdaptation {
@@ -59,8 +87,12 @@ export function normalizeNovelAdaptation(raw: RawNovelAdaptation, episodeNumber 
   const rawScenes = Array.isArray(raw?.scenes) ? raw.scenes : [];
   const scenes = rawScenes
     .map((scene, index): ImportedSceneDraft | null => {
-      const script = cleanText(scene?.script);
-      if (script.length < 40) return null;
+      const rawScript = cleanText(scene?.script);
+      if (rawScript.length < 40) return null;
+      const timeMarker = cleanText(scene?.timeMarker).slice(0, 40);
+      const script = timeMarker && !rawScript.slice(0, 50).includes(timeMarker)
+        ? `${timeMarker}。\n${rawScript}`
+        : rawScript;
       return {
         episodeNumber: normalizedEpisode,
         title: cleanText(scene?.title, `改编场景 ${index + 1}`).slice(0, 80),
@@ -71,7 +103,7 @@ export function normalizeNovelAdaptation(raw: RawNovelAdaptation, episodeNumber 
         retainedHighlights: cleanList(scene?.retainedHighlights, 4),
         appearingCharacters: cleanList(scene?.appearingCharacters, 8),
         establishedFacts: cleanList(scene?.establishedFacts, 6),
-        timeMarker: cleanText(scene?.timeMarker).slice(0, 40) || undefined,
+        timeMarker: timeMarker || undefined,
       };
     })
     .filter((scene): scene is ImportedSceneDraft => Boolean(scene))

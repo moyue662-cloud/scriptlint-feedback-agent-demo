@@ -84,7 +84,7 @@ const instructions = `你是短剧交互编译器，不是自由改写作者。�
 8. executionPrompt 要完整列出修正后的节拍，并约束后续分镜模型保持人物、道具、空间和因果连续。
 9. 如果提供“上一场状态”，必须默认继承人物情绪、知情信息、道具、空间与时间；若新剧本开场与其冲突且没有明确变化过程，添加 hard continuity 问题并给出补桥建议。
 10. 仅输出符合下方 JSON Schema 的数据；禁止 Markdown 代码块、注释、未加双引号的键和尾随逗号。
-11. 如果提供“改编衔接上下文”，全局人物表及前场已建立事实是人物认知判断的依据；不得把已经建立的信息误报为 knowledge_risk，也不得使用尚未出现的未来事实。
+11. 如果提供“改编衔接上下文”，只有 priorScenes.establishedFacts 是当前场开场时已知的事实，不得把它们误报为 knowledge_risk。currentScene.factsToEstablish 是本场结束前需要建立的目标，不代表人物开场已经知道；必须先通过动作、台词或画面建立，之后人物才能使用。
 12. 当前场列出的出场人物必须进入 characters；每次语言或动作刺激都要在同一节拍给出承接反应和回应。若正文有时间跳跃，必须用明确时间标记建立过渡。
 
 JSON Schema：
@@ -228,6 +228,7 @@ export async function POST(request: Request) {
         narrativeRole: cleanContextText(value.narrativeRole, 30),
         retainedHighlights: cleanContextList(value.retainedHighlights, 4),
         appearingCharacters: cleanContextList(value.appearingCharacters, 8),
+        factsToEstablish: cleanContextList(value.factsToEstablish ?? value.establishedFacts, 6),
         establishedFacts: cleanContextList(value.establishedFacts, 6),
         timeMarker: cleanContextText(value.timeMarker, 40),
       };

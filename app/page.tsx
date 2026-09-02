@@ -21,7 +21,7 @@ import {
 import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
 import { passesEpisodeAIReviewGate, type EpisodeAIReview } from '@/lib/episode-ai-review';
 import { splitScriptIntoScenes, type ImportedSceneDraft } from '@/lib/batch-import';
-import type { AdaptationCompileContext, NovelAdaptationResult } from '@/lib/novel-adaptation';
+import { buildAdaptationCompileContext, type AdaptationCompileContext, type NovelAdaptationResult } from '@/lib/novel-adaptation';
 import { EVAL_CASES, evaluateCase, summarizeEvaluation, type EvaluationSummary } from '@/lib/eval-suite';
 import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState } from '@/lib/scene-state';
 import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, SceneVersionSummary, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
@@ -361,26 +361,7 @@ export default function Home() {
   }
 
   function loadBatchDraft(draft: ImportedSceneDraft) {
-    const sceneIndex = batchAdaptation?.scenes.findIndex((scene) => scene === draft || (scene.title === draft.title && scene.script === draft.script)) ?? -1;
-    setAdaptationCompileContext(batchAdaptation && sceneIndex >= 0 ? {
-      theme: batchAdaptation.theme,
-      logline: batchAdaptation.logline,
-      globalCharacters: batchAdaptation.characters,
-      currentScene: {
-        title: draft.title,
-        narrativeRole: draft.narrativeRole,
-        retainedHighlights: draft.retainedHighlights ?? [],
-        appearingCharacters: draft.appearingCharacters ?? [],
-        establishedFacts: draft.establishedFacts ?? [],
-        timeMarker: draft.timeMarker,
-      },
-      priorScenes: batchAdaptation.scenes.slice(Math.max(0, sceneIndex - 5), sceneIndex).map((scene) => ({
-        title: scene.title,
-        retainedHighlights: scene.retainedHighlights ?? [],
-        establishedFacts: scene.establishedFacts ?? [],
-        timeMarker: scene.timeMarker,
-      })),
-    } : null);
+    setAdaptationCompileContext(buildAdaptationCompileContext(batchAdaptation, draft));
     setEpisodeNumber(draft.episodeNumber);
     setSceneTitle(draft.title);
     setScript(draft.script);

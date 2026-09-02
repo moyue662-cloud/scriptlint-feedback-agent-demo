@@ -70,6 +70,7 @@ const actionWords = [
 ];
 
 const genericActionPattern = /保持当前站位，把注意力转向对方，等待其反应|等待(?:其|对方)?(?:反应|回应)/;
+const genericResponsePattern = /^(?:以接下来的行动回应|等待(?:其|对方)?(?:反应|回应)|无回应|未回应|回应缺失)$/;
 
 const characterStopWords = new Set([
   '原始剧本', '客厅', '晚上', '夜晚', '随后', '突然', '因为', '但是',
@@ -292,6 +293,12 @@ export function normalizeAnalysisResult(
     const modelAction = typeof raw.action === 'string' ? raw.action.trim() : '';
     const inferredAction = inferAction(source, emotion, dialogue);
     const action = hasConcreteAction(modelAction) ? modelAction : inferredAction;
+    const rawResponse = typeof raw.response === 'string' ? raw.response.trim() : '';
+    const fallbackResponse = fallback?.response?.trim() ?? '';
+    const responseCandidate = rawResponse || fallbackResponse;
+    const response = responseCandidate && !genericResponsePattern.test(responseCandidate)
+      ? responseCandidate
+      : `${typeof raw.receiver === 'string' && raw.receiver.trim() ? raw.receiver.trim() : fallback?.receiver ?? '对方'}停顿半秒，抬眼看向对方，以视线变化明确承接上一动作`;
     return {
       ...raw,
       id: typeof raw.id === 'string' && raw.id.trim() ? raw.id : `B${String(index + 1).padStart(2, '0')}`,
@@ -303,7 +310,7 @@ export function normalizeAnalysisResult(
       action,
       dialogue,
       reaction: typeof raw.reaction === 'string' && raw.reaction.trim() ? raw.reaction : fallback?.reaction ?? '动作短暂停顿，并将注意力转向对方',
-      response: typeof raw.response === 'string' && raw.response.trim() ? raw.response : fallback?.response ?? '以接下来的行动回应',
+      response,
       stateBefore: typeof raw.stateBefore === 'string' && raw.stateBefore.trim() ? raw.stateBefore : fallback?.stateBefore ?? '观望',
       stateAfter: typeof raw.stateAfter === 'string' && raw.stateAfter.trim() ? raw.stateAfter : fallback?.stateAfter ?? '立场更明确',
     } satisfies InteractionBeat;
@@ -343,7 +350,7 @@ export function normalizeAnalysisResult(
       suggestion: `已使用动作表达：${beat.action}`,
       resolved: true,
     };
-    if (issue.type === 'missing_response' && beat && beat.reaction.trim() && beat.response.trim()) return {
+    if (issue.type === 'missing_response' && beat && beat.reaction.trim() && beat.response.trim() && !genericResponsePattern.test(beat.response)) return {
       ...issue,
       detail: `已补全承接反应与回应：${beat.reaction}；${beat.response}`,
       suggestion: '已补全，无需人工处理。',
