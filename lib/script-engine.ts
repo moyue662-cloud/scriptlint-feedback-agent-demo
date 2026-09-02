@@ -172,13 +172,15 @@ function hasConcreteAction(action: string) {
     || /目光|视线|距离|语速|音量|声音|姿势|站位|身体|肩膀|下颌|手指|呼吸|停顿|开口|说出|观察/.test(normalized);
 }
 
-function weakActionIssue(beat: InteractionBeat, issueId: string): ScriptIssue {
+function weakActionIssue(beat: InteractionBeat, issueId: string, resolved = hasConcreteAction(beat.action)): ScriptIssue {
   return {
     id: issueId, severity: 'soft', type: 'weak_action', targetId: beat.id,
     title: '缺少明确的可执行动作',
-    detail: '当前内容主要描述心理或结果，没有给出单一、可拍摄的动作。',
-    suggestion: `补充动作：${beat.action}`,
-    resolved: false,
+    detail: resolved
+      ? '已根据该节拍的台词、情绪或上下文补全为单一、可拍摄动作。'
+      : '当前内容主要描述心理或结果，没有给出单一、可拍摄的动作。',
+    suggestion: `${resolved ? '已补充动作' : '补充动作'}：${beat.action}`,
+    resolved,
   };
 }
 
@@ -258,8 +260,8 @@ export function analyzeScript(script: string): AnalysisResult {
     }
   });
 
-  const hardCount = issues.filter((issue) => issue.severity === 'hard').length;
-  const softCount = issues.filter((issue) => issue.severity === 'soft').length;
+  const hardCount = issues.filter((issue) => issue.severity === 'hard' && !issue.resolved).length;
+  const softCount = issues.filter((issue) => issue.severity === 'soft' && !issue.resolved).length;
   return {
     characters, beats, issues,
     score: Math.max(35, Math.min(98, 96 - hardCount * 18 - softCount * 5)),

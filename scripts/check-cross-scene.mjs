@@ -144,6 +144,7 @@ const { analyzeScript, normalizeAnalysisResult } = scriptEngineModule;
   const emotionOnly = analyzeScript('林晓怀疑父亲。父亲尴尬。林晓继续追问。');
   const emotionWeakIssues = emotionOnly.issues.filter((issue) => issue.type === 'weak_action');
   assert.equal(emotionWeakIssues.length, 2);
+  assert.ok(emotionWeakIssues.every((issue) => issue.resolved));
   assert.ok(emotionWeakIssues.every((issue) => !issue.suggestion.includes('等待其反应')));
 
   const modelLike = normalizeAnalysisResult({
