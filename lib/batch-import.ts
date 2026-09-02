@@ -5,7 +5,7 @@ export interface ImportedSceneDraft {
   splitReason?: 'heading' | 'paragraph' | 'length';
 }
 
-const headingPattern = /^(?:(?:第\s*)?(\d{1,3})\s*[场镜幕](?:\s+.*)?|场景\s*(\d{1,3})(?:\s+.*)?|场次\s*(\d{1,3})(?:\s+.*)?|(?:INT\.?|EXT\.?)(?:[ .：:].*)|(?:内景|外景)[：:].*)$/i;
+const headingPattern = /^(?:(?:第\s*)?(\d{1,3})\s*[场镜幕](?:(?:\s*[:：\-—]\s*|\s+).*)?|场景\s*(\d{1,3})(?:(?:\s*[:：\-—]\s*|\s+).*)?|场次\s*(\d{1,3})(?:(?:\s*[:：\-—]\s*|\s+).*)?|(?:INT\.?|EXT\.?)(?:[ .：:].*)|(?:内景|外景)[：:].*)$/i;
 
 function cleanTitle(line: string, index: number) {
   const text = line.trim().replace(/^[#*\-\s]+/, '').replace(/[：:]\s*$/, '').trim();
@@ -26,15 +26,27 @@ function splitLongBlock(input: string, episodeNumber: number) {
   let currentLength = 0;
   const targetLength = 1800;
   const targetUnits = 18;
+  const appendUnit = (unit: string) => {
+    let remaining = unit;
+    while (remaining.length > targetLength) {
+      if (current.length > 0) chunks.push(current.join(''));
+      chunks.push(remaining.slice(0, targetLength));
+      current = [];
+      currentLength = 0;
+      remaining = remaining.slice(targetLength);
+    }
+    if (remaining) {
+      current.push(remaining);
+      currentLength += remaining.length + (current.length > 1 ? 1 : 0);
+    }
+  };
   units.forEach((unit) => {
     if (current.length > 0 && (currentLength >= targetLength || current.length >= targetUnits)) {
       chunks.push(current.join(''));
       current = [];
       currentLength = 0;
     }
-    const nextLength = currentLength + unit.length + (current.length ? 1 : 0);
-    current.push(unit);
-    currentLength = nextLength;
+    appendUnit(unit);
   });
   if (current.length > 0) chunks.push(current.join(''));
   return chunks.slice(0, 80).map((script, index) => ({
@@ -68,7 +80,7 @@ export function splitScriptIntoScenes(input: string, episodeNumber = 1): Importe
   pushDraft(drafts, currentLines, currentTitle, currentEpisode, 'heading');
 
   if (drafts.length > 1) return drafts.slice(0, 80);
-  const blocks = normalized.split(/\n\s*\n\s*\n+/).map((block) => block.trim()).filter(Boolean);
+  const blocks = normalized.split(/\n\s*\n+/).map((block) => block.trim()).filter(Boolean);
   if (blocks.length > 1) {
     return blocks.slice(0, 80).map((script, index) => ({ episodeNumber, title: `分段建议 ${index + 1}`, script, splitReason: 'paragraph' as const }));
   }
