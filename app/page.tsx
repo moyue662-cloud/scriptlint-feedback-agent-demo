@@ -71,6 +71,17 @@ const sampleScript = `客厅，夜晚。
 const AI_REQUEST_TIMEOUT_MS = 34000;
 const PIPELINE_LOOP_LIMIT = 3;
 
+async function readApiJson<T>(response: Response, fallbackMessage: string) {
+  const raw = await response.text();
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    // A CDN or edge error may return HTML instead of JSON. Keep that detail
+    // out of the editor so its normal local fallback can run cleanly.
+    throw new Error(response.ok ? fallbackMessage : '服务暂时不可用，请稍后重试。');
+  }
+}
+
 type VisualUpload = { name: string; mimeType: string; dataUrl: string };
 
 function readFileAsDataUrl(file: File) {
@@ -208,7 +219,7 @@ export default function Home() {
   async function loadScenes() {
     try {
       const response = await fetch('/api/scenes');
-      const payload = await response.json() as { scenes?: StoredScene[] };
+      const payload = await readApiJson<{ scenes?: StoredScene[] }>(response, '场次列表返回格式异常。');
       if (response.ok && payload.scenes) setScenes(payload.scenes);
     } catch {
       // The current-scene workflow remains usable if persistent history is temporarily unavailable.
@@ -218,7 +229,7 @@ export default function Home() {
   async function loadEpisodeSummaries() {
     try {
       const response = await fetch('/api/episodes');
-      const payload = await response.json() as { summaries?: EpisodeSummary[] };
+      const payload = await readApiJson<{ summaries?: EpisodeSummary[] }>(response, '集数总结返回格式异常。');
       if (response.ok && payload.summaries) setEpisodeSummaries(payload.summaries);
     } catch {
       // Episode summaries are non-blocking; the scene workflow remains usable if they are unavailable.
@@ -228,7 +239,7 @@ export default function Home() {
   async function loadEpisodeAIReviews() {
     try {
       const response = await fetch('/api/episodes/review');
-      const payload = await response.json() as { reviews?: EpisodeAIReview[] };
+      const payload = await readApiJson<{ reviews?: EpisodeAIReview[] }>(response, '整集审查记录返回格式异常。');
       if (response.ok && payload.reviews) setEpisodeAIReviews(payload.reviews);
     } catch {
       // AI reviews are an additional project gate; the per-scene workflow remains usable.
@@ -242,7 +253,7 @@ export default function Home() {
   async function loadProject() {
     try {
       const response = await fetch('/api/project');
-      const payload = await response.json() as { project?: SceneProject };
+      const payload = await readApiJson<{ project?: SceneProject }>(response, '项目资料返回格式异常。');
       if (response.ok && payload.project) {
         setProject(payload.project);
         setProjectName(payload.project.name);
@@ -255,7 +266,7 @@ export default function Home() {
   async function loadVisualReviewHistory(sceneId: string) {
     try {
       const response = await fetch(`/api/visual-review?sceneId=${encodeURIComponent(sceneId)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
-      const payload = await response.json() as { reviews?: Array<{ id: string; sourceName: string; createdAt: string; review: VisualReview }> };
+      const payload = await readApiJson<{ reviews?: Array<{ id: string; sourceName: string; createdAt: string; review: VisualReview }> }>(response, '视觉检查历史返回格式异常。');
       if (response.ok && payload.reviews) setVisualReviewHistory(payload.reviews);
     } catch {
       // Visual history is supplementary; a new review can still be run if it is unavailable.
@@ -291,7 +302,7 @@ export default function Home() {
     setNotice('');
     try {
       const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
-      const payload = await response.json() as { scene?: StoredSceneDetail; error?: string };
+      const payload = await readApiJson<{ scene?: StoredSceneDetail; error?: string }>(response, '场次载入返回格式异常，请稍后重试。');
       if (!response.ok || !payload.scene) throw new Error(payload.error || '场次载入失败');
       const detail = payload.scene;
       applySceneDetail(detail);
@@ -336,7 +347,7 @@ export default function Home() {
     setIsVersionHistoryLoading(true);
     try {
       const response = await fetch(`/api/scenes?id=${encodeURIComponent(sceneId)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}&action=versions`);
-      const payload = await response.json() as { versions?: SceneVersionSummary[]; error?: string };
+      const payload = await readApiJson<{ versions?: SceneVersionSummary[]; error?: string }>(response, '版本历史返回格式异常，请稍后重试。');
       if (!response.ok || !payload.versions) throw new Error(payload.error || '版本历史载入失败');
       const versions = payload.versions;
       setSceneVersions((current) => ({ ...current, [sceneId]: versions }));
@@ -356,7 +367,7 @@ export default function Home() {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, versionId, action: 'restore-version' }),
       });
-      const payload = await response.json() as { restored?: StoredSceneDetail; scenes?: StoredScene[]; error?: string };
+      const payload = await readApiJson<{ restored?: StoredSceneDetail; scenes?: StoredScene[]; error?: string }>(response, '版本恢复返回格式异常，请稍后重试。');
       if (!response.ok || !payload.restored || !payload.scenes) throw new Error(payload.error || '版本恢复失败');
       setScenes(payload.scenes);
       applySceneDetail(payload.restored);
@@ -381,7 +392,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: projectName }),
       });
-      const payload = await response.json() as { project?: SceneProject; error?: string };
+      const payload = await readApiJson<{ project?: SceneProject; error?: string }>(response, '项目资料保存返回格式异常，请稍后重试。');
       if (!response.ok || !payload.project) throw new Error(payload.error || '项目资料保存失败');
       setProject(payload.project);
       setProjectName(payload.project.name);
@@ -403,7 +414,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approved }),
       });
-      const payload = await response.json() as { project?: SceneProject; error?: string };
+      const payload = await readApiJson<{ project?: SceneProject; error?: string }>(response, '项目终审返回格式异常，请稍后重试。');
       if (!response.ok || !payload.project) throw new Error(payload.error || '项目终审状态保存失败');
       setProject(payload.project);
       setProjectName(payload.project.name);
@@ -421,7 +432,7 @@ export default function Home() {
     setNotice('');
     try {
       const response = await fetch('/api/export');
-      const payload = await response.json() as Record<string, unknown> & { error?: string };
+      const payload = await readApiJson<Record<string, unknown> & { error?: string }>(response, '项目执行包返回格式异常，请稍后重试。');
       if (!response.ok) throw new Error(payload.error || '项目执行包生成失败');
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
       const url = URL.createObjectURL(blob);
@@ -463,7 +474,7 @@ export default function Home() {
           ...activeEpisodeSummaryDraft,
         }),
       });
-      const payload = await response.json() as { summary?: EpisodeSummary; error?: string };
+      const payload = await readApiJson<{ summary?: EpisodeSummary; error?: string }>(response, '集数总结保存返回格式异常，请稍后重试。');
       if (!response.ok || !payload.summary) throw new Error(payload.error || '集数总结保存失败');
       const savedSummary = payload.summary;
       setEpisodeSummaries((current) => [
@@ -491,7 +502,7 @@ export default function Home() {
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, episodeNumber: activeSummaryEpisode }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS + 5000),
       });
-      const payload = await response.json() as { review?: EpisodeAIReview; error?: string };
+      const payload = await readApiJson<{ review?: EpisodeAIReview; error?: string }>(response, '整集审查返回格式异常，请稍后重试。');
       if (!response.ok || !payload.review) throw new Error(payload.error || 'AI整集审查失败');
       const review = payload.review;
       setEpisodeAIReviews((current) => [
@@ -676,11 +687,11 @@ export default function Home() {
       }),
       signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
     });
-    const payload = await response.json() as {
+    const payload = await readApiJson<{
       result?: AnalysisResult;
       error?: string;
       meta?: { previousSceneNumber?: number | null };
-    };
+    }>(response, '智能分析返回格式异常，请稍后再试。');
     if (!response.ok || !payload.result) throw new Error(payload.error || '智能分析失败');
     setPreviousSceneNumber(payload.meta?.previousSceneNumber ?? null);
     return payload.result;
@@ -748,7 +759,7 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ script, analysis, projectId: project?.id || DEFAULT_PROJECT_ID, ...(loadedSceneId ? { sceneId: loadedSceneId } : {}) }),
         });
-        const payload = await response.json() as { result?: StoryboardResult; error?: string };
+        const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜服务返回格式异常，请稍后再试。');
         if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
         nextStoryboard = payload.result;
       } catch {
@@ -782,7 +793,7 @@ export default function Home() {
               ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
             }),
           });
-          const payload = await response.json() as { result?: StoryboardResult; error?: string };
+          const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜修复返回格式异常，请稍后再试。');
           if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
           nextStoryboard = payload.result;
         } catch {
@@ -887,7 +898,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ script, analysis: result, projectId: project?.id || DEFAULT_PROJECT_ID, ...(loadedSceneId ? { sceneId: loadedSceneId } : {}) }),
       });
-      const payload = await response.json() as { result?: StoryboardResult; error?: string };
+      const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜服务返回格式异常，请稍后再试。');
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
       setStoryboard(payload.result);
       setDeliveryShotStatuses(activeSavedScene ? getPersistedDeliveryStatuses(payload.result) : {});
@@ -915,7 +926,7 @@ export default function Home() {
           ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
         }),
       });
-      const payload = await response.json() as { result?: StoryboardResult; error?: string };
+      const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜修复返回格式异常，请稍后再试。');
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
       setStoryboard(payload.result);
       setDeliveryShotStatuses({});
@@ -945,10 +956,10 @@ export default function Home() {
           deliveryTracking: { statuses: deliveryShotStatuses },
         }),
       });
-      const payload = await response.json() as {
+      const payload = await readApiJson<{
         saved?: { id: string; sceneNumber: number; episodeNumber: number; sceneOrder: number; episodeSceneNumber: number | null; updated: boolean };
         error?: string;
-      };
+      }>(response, '场次保存返回格式异常，请稍后重试。');
       if (!response.ok || !payload.saved) throw new Error(payload.error || '场次状态保存失败');
       invalidateEpisodeAIReview(payload.saved.episodeNumber);
       await Promise.all([loadScenes(), loadProject()]);
@@ -988,7 +999,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, action: direction }),
       });
-      const payload = await response.json() as { moved?: boolean; error?: string };
+      const payload = await readApiJson<{ moved?: boolean; error?: string }>(response, '场次顺序返回格式异常，请稍后重试。');
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
         const movedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
@@ -1012,7 +1023,7 @@ export default function Home() {
       const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`, {
         method: 'DELETE',
       });
-      const payload = await response.json() as { scenes?: StoredScene[]; error?: string };
+      const payload = await readApiJson<{ scenes?: StoredScene[]; error?: string }>(response, '场次删除返回格式异常，请稍后重试。');
       if (!response.ok || !payload.scenes) throw new Error(payload.error || '场次删除失败');
       setScenes(payload.scenes);
       invalidateEpisodeAIReview(scene.episodeNumber);
@@ -1036,7 +1047,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, targetSceneId, action: 'move-before' }),
       });
-      const payload = await response.json() as { moved?: boolean; error?: string };
+      const payload = await readApiJson<{ moved?: boolean; error?: string }>(response, '场次顺序返回格式异常，请稍后重试。');
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
         const movedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
@@ -1090,7 +1101,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, deliveryTracking: { statuses } }),
       });
-      const payload = await response.json() as { tracking?: StoredScene['deliveryTracking']; error?: string };
+      const payload = await readApiJson<{ tracking?: StoredScene['deliveryTracking']; error?: string }>(response, '制作进度返回格式异常，请稍后重试。');
       if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
       await Promise.all([loadScenes(), loadProject()]);
       setNotice('制作进度已保存，刷新页面后仍可继续。');
@@ -1196,7 +1207,7 @@ export default function Home() {
         }),
         signal: AbortSignal.timeout(56000),
       });
-      const payload = await response.json() as { review?: VisualReview; error?: string };
+      const payload = await readApiJson<{ review?: VisualReview; error?: string }>(response, '视觉检查返回格式异常，请稍后再试。');
       if (!response.ok || !payload.review) throw new Error(payload.error || '视觉检查失败');
       setVisualReview(payload.review);
       if (loadedSceneId) void loadVisualReviewHistory(loadedSceneId);
@@ -1226,7 +1237,7 @@ export default function Home() {
             body: JSON.stringify({ script: testCase.script, mode: 'analyze', projectId: project?.id || DEFAULT_PROJECT_ID }),
             signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
           });
-          const payload = await response.json() as { result?: AnalysisResult; error?: string };
+          const payload = await readApiJson<{ result?: AnalysisResult; error?: string }>(response, '评测分析返回格式异常，请稍后再试。');
           if (!response.ok || !payload.result) throw new Error(payload.error || '模型未返回结果');
           modelResults.push(evaluateCase(testCase, payload.result));
         } catch (error) {
