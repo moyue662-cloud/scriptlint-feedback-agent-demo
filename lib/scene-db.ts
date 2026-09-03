@@ -98,20 +98,6 @@ async function ensureSchema() {
     await db.prepare(createEpisodeSummariesTableSql).run();
     await db.prepare(createEpisodeAiReviewsTableSql).run();
     await db.prepare(createSceneStatesTableSql).run();
-    await db.prepare(createSceneVersionsTableSql).run();
-    await db.prepare(createSceneVersionsIndexSql).run();
-    await db.prepare(createSceneVisualReviewsTableSql).run();
-    await db.prepare(createSceneVisualReviewsIndexSql).run();
-    await db.prepare(
-      `INSERT INTO scene_versions
-       (id, scene_id, project_id, version_number, episode_number, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
-       SELECT 'baseline:' || s.id, s.id, s.project_id, 1, s.episode_number, s.title, s.source_hash, s.script,
-         s.analysis_json, s.storyboard_json, s.snapshot_json, s.delivery_tracking_json, s.created_at
-       FROM scene_states s
-       WHERE NOT EXISTS (
-         SELECT 1 FROM scene_versions v WHERE v.scene_id = s.id AND v.project_id = s.project_id
-       )`,
-    ).run();
     const columns = await db.prepare('PRAGMA table_info(scene_states)').all<{ name: string }>();
     if (!columns.results.some((column) => column.name === 'delivery_tracking_json')) {
       try {
@@ -145,6 +131,22 @@ async function ensureSchema() {
       await db.prepare('UPDATE scene_states SET scene_order = scene_number WHERE scene_order = 0').run();
     }
     await db.prepare(createSceneOrderIndexSql).run();
+    // Create dependent tables only after legacy scene_states databases have all
+    // columns used by the baseline backfill below.
+    await db.prepare(createSceneVersionsTableSql).run();
+    await db.prepare(createSceneVersionsIndexSql).run();
+    await db.prepare(createSceneVisualReviewsTableSql).run();
+    await db.prepare(createSceneVisualReviewsIndexSql).run();
+    await db.prepare(
+      `INSERT INTO scene_versions
+       (id, scene_id, project_id, version_number, episode_number, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
+       SELECT 'baseline:' || s.id, s.id, s.project_id, 1, s.episode_number, s.title, s.source_hash, s.script,
+         s.analysis_json, s.storyboard_json, s.snapshot_json, s.delivery_tracking_json, s.created_at
+       FROM scene_states s
+       WHERE NOT EXISTS (
+         SELECT 1 FROM scene_versions v WHERE v.scene_id = s.id AND v.project_id = s.project_id
+       )`,
+    ).run();
     await db.prepare(
       'INSERT OR IGNORE INTO projects (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)',
     ).bind(DEFAULT_PROJECT_ID, '未命名短剧项目', new Date().toISOString(), new Date().toISOString()).run();

@@ -63,8 +63,14 @@ const emotionActions: Record<string, string> = {
 
 const actionWords = [
   '发现', '看见', '拿起', '放下', '拍', '推', '走', '站', '坐', '停',
-  '抬头', '低头', '转身', '质问', '解释', '回答', '避开', '看向',
+  '抬头', '低头', '转身', '质问', '追问', '解释', '回答', '避开', '看向',
+  '盯', '攥', '握', '抓', '松开', '靠近', '后退', '迈', '点头', '摇头',
+  '吸气', '呼吸', '停顿', '开口', '说', '喊', '哭', '笑', '沉默', '摩挲',
+  '贴', '递', '指', '按', '敲', '翻', '撕', '摔', '端', '举', '收回', '伸出',
 ];
+
+const genericActionPattern = /保持当前站位，把注意力转向对方，等待其反应|等待(?:其|对方)?(?:反应|回应)/;
+const genericResponsePattern = /^(?:以接下来的行动回应|等待(?:其|对方)?(?:反应|回应)|无回应|未回应|回应缺失)$/;
 
 const characterStopWords = new Set([
   '原始剧本', '客厅', '晚上', '夜晚', '随后', '突然', '因为', '但是',
@@ -96,7 +102,7 @@ function detectCharacters(script: string) {
 
   for (const match of script.matchAll(/(?:^|[。！？!?\n])\s*([\u4e00-\u9fa5]{2,4})\s*[：:]/g)) add(match[1]);
   for (const match of script.matchAll(
-    /([\u4e00-\u9fa5]{2,4})(?=发现|看见|质问|询问|回答|解释|说道|说|问|喊|哭|笑|感到|试图|沉默|拿起|放下|转身)/g,
+    /([\u4e00-\u9fa5]{2,4})(?=发现|看见|质问|询问|回答|解释|说道|说|问|喊|哭|笑|感到|试图|沉默|拿起|放下|转身|怀疑|不相信|尴尬|生气|愤怒|紧张|难过|害怕|高兴|追问)/g,
   )) add(match[1]);
 
   ['父亲', '母亲', '女儿', '儿子', '老师', '医生', '老板'].forEach((name) => {
@@ -124,7 +130,7 @@ function extractDialogue(sentence: string) {
   return colon ? colon[1].replace(/[。！？!?]$/, '') : '';
 }
 
-function inferAction(sentence: string, emotion?: string) {
+function inferAction(sentence: string, emotion?: string, dialogue = '') {
   if (actionWords.some((word) => sentence.includes(word))) {
     return sentence
       .replace(/[“"]([^”"]+)[”"]/g, '')
@@ -132,8 +138,52 @@ function inferAction(sentence: string, emotion?: string) {
       .replace(/[，,:：。！？!?]+$/g, '')
       .trim();
   }
+  if (dialogue) {
+    const combined = `${sentence}${dialogue}`;
+    if (/？|\?|为什么|怎么|什么时候|吗|哪/.test(combined)) {
+      return '保持与对方目光接触，停顿半秒后追问';
+    }
+    if (/！|!|喊|吼|怒/.test(combined)) {
+      return '身体向前一步，抬高音量说出这句话';
+    }
+    if (/回答|解释|说明|承认|不是|是的|我知道/.test(combined)) {
+      return '先吸气稳定语速，直视对方并解释';
+    }
+    return '保持当前站位，直视对方并清晰说出这句话';
+  }
   if (emotion) return emotionActions[emotion];
+  if (/怀疑|担心|意识到|想到|觉得|认为|感到|不相信|犹豫/.test(sentence)) {
+    return '短暂停顿，视线落在关键对象上，再抬眼观察对方';
+  }
+  if (/决定|准备|想要|试图|打算/.test(sentence)) {
+    return '收回视线，调整站姿，朝目标迈出一步';
+  }
+  if (/拒绝|否认|不愿|不肯/.test(sentence)) {
+    return '摇头并收回伸出的手，和对方保持距离';
+  }
+  if (/结果|成功|完成|结束/.test(sentence)) {
+    return '确认结果后停住手上动作，抬眼观察对方';
+  }
   return '保持当前站位，把注意力转向对方，等待其反应';
+}
+
+function hasConcreteAction(action: string) {
+  const normalized = action.trim();
+  if (!normalized || genericActionPattern.test(normalized)) return false;
+  return actionWords.some((word) => normalized.includes(word))
+    || /目光|视线|距离|语速|音量|声音|姿势|站位|身体|肩膀|下颌|手指|呼吸|停顿|开口|说出|观察/.test(normalized);
+}
+
+function weakActionIssue(beat: InteractionBeat, issueId: string, resolved = hasConcreteAction(beat.action)): ScriptIssue {
+  return {
+    id: issueId, severity: 'soft', type: 'weak_action', targetId: beat.id,
+    title: '缺少明确的可执行动作',
+    detail: resolved
+      ? '已根据该节拍的台词、情绪或上下文补全为单一、可拍摄动作。'
+      : '当前内容主要描述心理或结果，没有给出单一、可拍摄的动作。',
+    suggestion: `${resolved ? '已补充动作' : '补充动作'}：${beat.action}`,
+    resolved,
+  };
 }
 
 function inferState(emotion: string | undefined, direction: 'before' | 'after') {
@@ -174,7 +224,7 @@ export function analyzeScript(script: string): AnalysisResult {
         ? sentence.includes('发现') ? sentence.split(/后|，/)[0] : '场景开始，人物注意到当前变化'
         : `承接B${String(index).padStart(2, '0')}的行动或台词`,
       goal: inferGoal(sentence, actor),
-      action: inferAction(sentence, emotion),
+      action: inferAction(sentence, emotion, dialogue),
       dialogue: dialogue || (sentence.includes('质问') ? '请把这件事解释清楚。' : ''),
       reaction: emotionActions[findEmotion(nextSentence) ?? ''] ?? '动作短暂停顿，并将注意力转向对方',
       response: nextDialogue || (index < sentences.length - 1 ? '以接下来的行动回应' : '沉默两秒，以目光回避作为回应'),
@@ -203,20 +253,124 @@ export function analyzeScript(script: string): AnalysisResult {
       suggestion: `改为：${emotionActions[emotion]}`, resolved: false,
     });
 
-    if (!actionWords.some((word) => beat.source.includes(word))) issues.push({
-      id: `E${String(issueIndex++).padStart(2, '0')}`, severity: 'soft',
-      type: 'weak_action', targetId: beat.id, title: '缺少明确的可执行动作',
-      detail: '当前内容主要描述心理或结果，没有给出单一、可拍摄的动作。',
-      suggestion: `补充动作：${beat.action}`, resolved: false,
-    });
+    // Dialogue already has a deterministic speaking action. Only flag beats
+    // whose source is still purely psychological/result-oriented, and point
+    // the writer to the inferred, beat-specific action instead of repeating a
+    // one-size-fits-all suggestion.
+    if (!actionWords.some((word) => beat.source.includes(word)) && !beat.dialogue) {
+      issues.push(weakActionIssue(beat, `E${String(issueIndex++).padStart(2, '0')}`));
+    }
   });
 
-  const hardCount = issues.filter((issue) => issue.severity === 'hard').length;
-  const softCount = issues.filter((issue) => issue.severity === 'soft').length;
+  const hardCount = issues.filter((issue) => issue.severity === 'hard' && !issue.resolved).length;
+  const softCount = issues.filter((issue) => issue.severity === 'soft' && !issue.resolved).length;
   return {
     characters, beats, issues,
     score: Math.max(35, Math.min(98, 96 - hardCount * 18 - softCount * 5)),
     executionPrompt: buildExecutionPrompt(beats), analyzedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Stabilise a model response before it reaches the UI. Models occasionally
+ * return empty/generic actions or copy the same weak-action warning onto every
+ * beat. We preserve the model's editorial fields while deterministically
+ * filling the execution-critical fields and rebuilding weak-action checks.
+ */
+export function normalizeAnalysisResult(
+  result: Omit<AnalysisResult, 'analyzedAt'>,
+  script: string,
+  rebuildWeakIssues = true,
+): Omit<AnalysisResult, 'analyzedAt'> {
+  const local = analyzeScript(script);
+  const beats = (Array.isArray(result.beats) ? result.beats : []).slice(0, 30).map((raw, index) => {
+    const fallback = local.beats[index];
+    const source = typeof raw.source === 'string' && raw.source.trim() ? raw.source.trim() : fallback?.source ?? '';
+    const dialogue = typeof raw.dialogue === 'string' && raw.dialogue.trim()
+      ? raw.dialogue.trim()
+      : extractDialogue(source);
+    const emotion = findEmotion(source);
+    const modelAction = typeof raw.action === 'string' ? raw.action.trim() : '';
+    const inferredAction = inferAction(source, emotion, dialogue);
+    const action = hasConcreteAction(modelAction) ? modelAction : inferredAction;
+    const rawResponse = typeof raw.response === 'string' ? raw.response.trim() : '';
+    const fallbackResponse = fallback?.response?.trim() ?? '';
+    const responseCandidate = rawResponse || fallbackResponse;
+    const response = responseCandidate && !genericResponsePattern.test(responseCandidate)
+      ? responseCandidate
+      : `${typeof raw.receiver === 'string' && raw.receiver.trim() ? raw.receiver.trim() : fallback?.receiver ?? '对方'}停顿半秒，抬眼看向对方，以视线变化明确承接上一动作`;
+    return {
+      ...raw,
+      id: typeof raw.id === 'string' && raw.id.trim() ? raw.id : `B${String(index + 1).padStart(2, '0')}`,
+      source,
+      actor: typeof raw.actor === 'string' && raw.actor.trim() ? raw.actor : fallback?.actor ?? '角色A',
+      receiver: typeof raw.receiver === 'string' && raw.receiver.trim() ? raw.receiver : fallback?.receiver ?? '对方',
+      trigger: typeof raw.trigger === 'string' && raw.trigger.trim() ? raw.trigger : fallback?.trigger ?? '场景开始，人物注意到当前变化',
+      goal: typeof raw.goal === 'string' && raw.goal.trim() ? raw.goal : fallback?.goal ?? '让对方理解自己的立场',
+      action,
+      dialogue,
+      reaction: typeof raw.reaction === 'string' && raw.reaction.trim() ? raw.reaction : fallback?.reaction ?? '动作短暂停顿，并将注意力转向对方',
+      response,
+      stateBefore: typeof raw.stateBefore === 'string' && raw.stateBefore.trim() ? raw.stateBefore : fallback?.stateBefore ?? '观望',
+      stateAfter: typeof raw.stateAfter === 'string' && raw.stateAfter.trim() ? raw.stateAfter : fallback?.stateAfter ?? '立场更明确',
+    } satisfies InteractionBeat;
+  });
+
+  const modelIssues = Array.isArray(result.issues) ? result.issues : [];
+  const beatById = new Map(beats.map((beat) => [beat.id, beat]));
+  const placeholderCharacters = /^(?:对方|角色A|角色B|未知人物|众人|群体|旁白)$/;
+  const characters = [...new Set([
+    ...(Array.isArray(result.characters) ? result.characters : []),
+    ...beats.flatMap((beat) => [beat.actor, beat.receiver]),
+  ].flatMap((name) => typeof name === 'string' ? name.split(/[、,，/／]+/) : [])
+    .map((name) => name.trim()).filter((name) => name && !placeholderCharacters.test(name)))].slice(0, 12);
+  const adjustedWeakIssues = modelIssues
+    .filter((issue) => issue.type === 'weak_action')
+    .map((issue) => {
+      const numericTarget = issue.targetId.match(/(\d+)$/)?.[1];
+      const beat = beatById.get(issue.targetId)
+        ?? (numericTarget ? beats[Number(numericTarget) - 1] : undefined);
+      return beat ? { ...issue, suggestion: `补充动作：${beat.action}` } : issue;
+    });
+  const preservedIssues = modelIssues.filter((issue) => issue.type !== 'weak_action').map((issue) => {
+    const numericTarget = issue.targetId.match(/(\d+)$/)?.[1];
+    const beat = beatById.get(issue.targetId)
+      ?? (numericTarget ? beats[Number(numericTarget) - 1] : undefined);
+    const rosterOnly = issue.type === 'missing_character'
+      && /characters|角色.*(?:未|不在|缺少)|未在.*列出|数组.*不包含/i.test(`${issue.title}${issue.detail}`);
+    if (rosterOnly && characters.length >= 2) return {
+      ...issue,
+      detail: '系统已根据节拍中的行动者和承接者自动同步人物表。',
+      suggestion: '已自动补入人物表，无需人工处理。',
+      resolved: true,
+    };
+    if (issue.type === 'abstract_emotion' && beat && hasConcreteAction(beat.action)) return {
+      ...issue,
+      detail: `抽象情绪已落实为可拍摄动作：${beat.action}`,
+      suggestion: `已使用动作表达：${beat.action}`,
+      resolved: true,
+    };
+    if (issue.type === 'missing_response' && beat && beat.reaction.trim() && beat.response.trim() && !genericResponsePattern.test(beat.response)) return {
+      ...issue,
+      detail: `已补全承接反应与回应：${beat.reaction}；${beat.response}`,
+      suggestion: '已补全，无需人工处理。',
+      resolved: true,
+    };
+    return issue;
+  });
+  const weakIssues = beats
+    .filter((beat) => !hasConcreteAction(beat.action) && !beat.dialogue)
+    .map((beat, index) => weakActionIssue(beat, `LOCAL-W${String(index + 1).padStart(2, '0')}`));
+  const issues = [...preservedIssues, ...(rebuildWeakIssues ? weakIssues : adjustedWeakIssues)];
+  const hardCount = issues.filter((issue) => issue.severity === 'hard' && !issue.resolved).length;
+  const softCount = issues.filter((issue) => issue.severity === 'soft' && !issue.resolved).length;
+  return {
+    ...result,
+    characters,
+    beats,
+    issues,
+    score: Math.max(35, Math.min(98, 96 - hardCount * 18 - softCount * 5)),
+    executionPrompt: buildExecutionPrompt(beats),
   };
 }
 
