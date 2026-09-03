@@ -21,6 +21,8 @@ import {
 import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
 import { passesEpisodeAIReviewGate, type EpisodeAIReview } from '@/lib/episode-ai-review';
 import { splitScriptIntoScenes, type ImportedSceneDraft } from '@/lib/batch-import';
+import { buildAdaptationCompileContext, type AdaptationCompileContext, type NovelAdaptationResult } from '@/lib/novel-adaptation';
+import { assessScriptInput } from '@/lib/script-input';
 import { EVAL_CASES, evaluateCase, summarizeEvaluation, type EvaluationSummary } from '@/lib/eval-suite';
 import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState } from '@/lib/scene-state';
 import type { DeliveryShotStatus, EpisodeSummary, SceneProductionStatus, SceneProject, SceneVersionSummary, StoredScene, StoredSceneDetail } from '@/lib/scene-state';
@@ -70,6 +72,17 @@ const sampleScript = `客厅，夜晚。
 
 const AI_REQUEST_TIMEOUT_MS = 34000;
 const PIPELINE_LOOP_LIMIT = 3;
+
+async function readApiJson<T>(response: Response, fallbackMessage: string) {
+  const raw = await response.text();
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    // A CDN or edge error may return HTML instead of JSON. Keep that detail
+    // out of the editor so its normal local fallback can run cleanly.
+    throw new Error(response.ok ? fallbackMessage : '服务暂时不可用，请稍后重试。');
+  }
+}
 
 type VisualUpload = { name: string; mimeType: string; dataUrl: string };
 
@@ -191,6 +204,9 @@ export default function Home() {
   const [deliveryShotStatuses, setDeliveryShotStatuses] = useState<Record<string, DeliveryShotStatus>>({});
   const [batchImportText, setBatchImportText] = useState('');
   const [batchDrafts, setBatchDrafts] = useState<ImportedSceneDraft[]>([]);
+  const [batchAdaptation, setBatchAdaptation] = useState<NovelAdaptationResult | null>(null);
+  const [adaptationCompileContext, setAdaptationCompileContext] = useState<AdaptationCompileContext | null>(null);
+  const [isBatchAdapting, setIsBatchAdapting] = useState(false);
   const [sceneVersions, setSceneVersions] = useState<Record<string, SceneVersionSummary[]>>({});
   const [versionHistorySceneId, setVersionHistorySceneId] = useState<string | null>(null);
   const [isVersionHistoryLoading, setIsVersionHistoryLoading] = useState(false);
@@ -208,7 +224,7 @@ export default function Home() {
   async function loadScenes() {
     try {
       const response = await fetch('/api/scenes');
-      const payload = await response.json() as { scenes?: StoredScene[] };
+      const payload = await readApiJson<{ scenes?: StoredScene[] }>(response, '场次列表返回格式异常。');
       if (response.ok && payload.scenes) setScenes(payload.scenes);
     } catch {
       // The current-scene workflow remains usable if persistent history is temporarily unavailable.
@@ -218,7 +234,7 @@ export default function Home() {
   async function loadEpisodeSummaries() {
     try {
       const response = await fetch('/api/episodes');
-      const payload = await response.json() as { summaries?: EpisodeSummary[] };
+      const payload = await readApiJson<{ summaries?: EpisodeSummary[] }>(response, '集数总结返回格式异常。');
       if (response.ok && payload.summaries) setEpisodeSummaries(payload.summaries);
     } catch {
       // Episode summaries are non-blocking; the scene workflow remains usable if they are unavailable.
@@ -228,7 +244,7 @@ export default function Home() {
   async function loadEpisodeAIReviews() {
     try {
       const response = await fetch('/api/episodes/review');
-      const payload = await response.json() as { reviews?: EpisodeAIReview[] };
+      const payload = await readApiJson<{ reviews?: EpisodeAIReview[] }>(response, '整集审查记录返回格式异常。');
       if (response.ok && payload.reviews) setEpisodeAIReviews(payload.reviews);
     } catch {
       // AI reviews are an additional project gate; the per-scene workflow remains usable.
@@ -242,7 +258,7 @@ export default function Home() {
   async function loadProject() {
     try {
       const response = await fetch('/api/project');
-      const payload = await response.json() as { project?: SceneProject };
+      const payload = await readApiJson<{ project?: SceneProject }>(response, '项目资料返回格式异常。');
       if (response.ok && payload.project) {
         setProject(payload.project);
         setProjectName(payload.project.name);
@@ -255,7 +271,7 @@ export default function Home() {
   async function loadVisualReviewHistory(sceneId: string) {
     try {
       const response = await fetch(`/api/visual-review?sceneId=${encodeURIComponent(sceneId)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
-      const payload = await response.json() as { reviews?: Array<{ id: string; sourceName: string; createdAt: string; review: VisualReview }> };
+      const payload = await readApiJson<{ reviews?: Array<{ id: string; sourceName: string; createdAt: string; review: VisualReview }> }>(response, '视觉检查历史返回格式异常。');
       if (response.ok && payload.reviews) setVisualReviewHistory(payload.reviews);
     } catch {
       // Visual history is supplementary; a new review can still be run if it is unavailable.
@@ -263,6 +279,7 @@ export default function Home() {
   }
 
   function applySceneDetail(detail: StoredSceneDetail) {
+    setAdaptationCompileContext(null);
     setScript(detail.script);
     window.localStorage.setItem('scene-flow-script', detail.script);
     setResult(detail.analysis);
@@ -291,7 +308,7 @@ export default function Home() {
     setNotice('');
     try {
       const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
-      const payload = await response.json() as { scene?: StoredSceneDetail; error?: string };
+      const payload = await readApiJson<{ scene?: StoredSceneDetail; error?: string }>(response, '场次载入返回格式异常，请稍后重试。');
       if (!response.ok || !payload.scene) throw new Error(payload.error || '场次载入失败');
       const detail = payload.scene;
       applySceneDetail(detail);
@@ -310,11 +327,42 @@ export default function Home() {
 
   function splitBatchImport() {
     const drafts = splitScriptIntoScenes(batchImportText, episodeNumber);
+    setBatchAdaptation(null);
+    setAdaptationCompileContext(null);
     setBatchDrafts(drafts);
-    setNotice(drafts.length > 0 ? `已识别 ${drafts.length} 个场次草稿，请逐场编译并保存。` : '没有识别到可导入的场次内容。');
+    setNotice(drafts.length > 0 ? `已按完整事件合并为 ${drafts.length} 个场次草稿；此模式保留原文，不主动删减剧情。` : '没有识别到可导入的场次内容。');
+  }
+
+  async function adaptBatchImport() {
+    if (!batchImportText.trim() || busy || isBatchAdapting) return;
+    setIsBatchAdapting(true);
+    setNotice('正在提炼主题、主线、人物关系和高潮，并把重复铺陈压缩成完整短剧场景…');
+    try {
+      const response = await fetch('/api/adapt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: batchImportText, episodeNumber }),
+        signal: AbortSignal.timeout(54000),
+      });
+      const payload = await readApiJson<{ result?: NovelAdaptationResult; error?: string }>(response, 'AI精简改编返回格式异常，请稍后再试。');
+      if (!response.ok || !payload.result) throw new Error(payload.error || 'AI精简改编失败');
+      setBatchAdaptation(payload.result);
+      setAdaptationCompileContext(null);
+      setBatchDrafts(payload.result.scenes);
+      setNotice(`AI精简改编完成：保留主线与高潮，压缩为 ${payload.result.scenes.length} 个完整场景，预计约 ${Math.ceil(payload.result.estimatedTotalDurationSec / 60)} 分钟。请逐场确认后载入编译。`);
+    } catch (error) {
+      const fallback = splitScriptIntoScenes(batchImportText, episodeNumber);
+      setBatchAdaptation(null);
+      setAdaptationCompileContext(null);
+      setBatchDrafts(fallback);
+      setNotice(`${error instanceof Error ? error.message : 'AI精简改编暂时不可用'}，已改用“仅合并原文”结果，未自动删除剧情。`);
+    } finally {
+      setIsBatchAdapting(false);
+    }
   }
 
   function loadBatchDraft(draft: ImportedSceneDraft) {
+    setAdaptationCompileContext(buildAdaptationCompileContext(batchAdaptation, draft));
     setEpisodeNumber(draft.episodeNumber);
     setSceneTitle(draft.title);
     setScript(draft.script);
@@ -328,7 +376,7 @@ export default function Home() {
     setVisualReview(null);
     setVisualFiles([]);
     setVisualReviewHistory([]);
-    setNotice(`已载入“${draft.title}”，现在可以运行AI编译或全流程。`);
+    setNotice(`已载入“${draft.title}”${draft.splitReason === 'adapted' ? '（AI精简场景）' : ''}，现在可以运行AI编译或全流程。`);
   }
 
   async function loadSceneVersions(sceneId: string) {
@@ -336,7 +384,7 @@ export default function Home() {
     setIsVersionHistoryLoading(true);
     try {
       const response = await fetch(`/api/scenes?id=${encodeURIComponent(sceneId)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}&action=versions`);
-      const payload = await response.json() as { versions?: SceneVersionSummary[]; error?: string };
+      const payload = await readApiJson<{ versions?: SceneVersionSummary[]; error?: string }>(response, '版本历史返回格式异常，请稍后重试。');
       if (!response.ok || !payload.versions) throw new Error(payload.error || '版本历史载入失败');
       const versions = payload.versions;
       setSceneVersions((current) => ({ ...current, [sceneId]: versions }));
@@ -356,7 +404,7 @@ export default function Home() {
         method: 'PATCH', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, versionId, action: 'restore-version' }),
       });
-      const payload = await response.json() as { restored?: StoredSceneDetail; scenes?: StoredScene[]; error?: string };
+      const payload = await readApiJson<{ restored?: StoredSceneDetail; scenes?: StoredScene[]; error?: string }>(response, '版本恢复返回格式异常，请稍后重试。');
       if (!response.ok || !payload.restored || !payload.scenes) throw new Error(payload.error || '版本恢复失败');
       setScenes(payload.scenes);
       applySceneDetail(payload.restored);
@@ -381,7 +429,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name: projectName }),
       });
-      const payload = await response.json() as { project?: SceneProject; error?: string };
+      const payload = await readApiJson<{ project?: SceneProject; error?: string }>(response, '项目资料保存返回格式异常，请稍后重试。');
       if (!response.ok || !payload.project) throw new Error(payload.error || '项目资料保存失败');
       setProject(payload.project);
       setProjectName(payload.project.name);
@@ -403,7 +451,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ approved }),
       });
-      const payload = await response.json() as { project?: SceneProject; error?: string };
+      const payload = await readApiJson<{ project?: SceneProject; error?: string }>(response, '项目终审返回格式异常，请稍后重试。');
       if (!response.ok || !payload.project) throw new Error(payload.error || '项目终审状态保存失败');
       setProject(payload.project);
       setProjectName(payload.project.name);
@@ -421,7 +469,7 @@ export default function Home() {
     setNotice('');
     try {
       const response = await fetch('/api/export');
-      const payload = await response.json() as Record<string, unknown> & { error?: string };
+      const payload = await readApiJson<Record<string, unknown> & { error?: string }>(response, '项目执行包返回格式异常，请稍后重试。');
       if (!response.ok) throw new Error(payload.error || '项目执行包生成失败');
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
       const url = URL.createObjectURL(blob);
@@ -463,7 +511,7 @@ export default function Home() {
           ...activeEpisodeSummaryDraft,
         }),
       });
-      const payload = await response.json() as { summary?: EpisodeSummary; error?: string };
+      const payload = await readApiJson<{ summary?: EpisodeSummary; error?: string }>(response, '集数总结保存返回格式异常，请稍后重试。');
       if (!response.ok || !payload.summary) throw new Error(payload.error || '集数总结保存失败');
       const savedSummary = payload.summary;
       setEpisodeSummaries((current) => [
@@ -491,7 +539,7 @@ export default function Home() {
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, episodeNumber: activeSummaryEpisode }),
         signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS + 5000),
       });
-      const payload = await response.json() as { review?: EpisodeAIReview; error?: string };
+      const payload = await readApiJson<{ review?: EpisodeAIReview; error?: string }>(response, '整集审查返回格式异常，请稍后重试。');
       if (!response.ok || !payload.review) throw new Error(payload.error || 'AI整集审查失败');
       const review = payload.review;
       setEpisodeAIReviews((current) => [
@@ -524,10 +572,11 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating || isBatchAdapting;
   const localStructureEstimate = useMemo(() => script.trim() ? analyzeScript(script).beats.length : 0, [script]);
   const sceneDraftEstimate = useMemo(() => script.trim() ? splitScriptIntoScenes(script, episodeNumber) : [], [script, episodeNumber]);
-  const shouldSuggestBatchImport = localStructureEstimate > 30 || sceneDraftEstimate.length > 1 || script.length > 6000;
+  const scriptInputAssessment = useMemo(() => assessScriptInput(script), [script]);
+  const shouldSuggestBatchImport = scriptInputAssessment.shouldAdaptFirst || localStructureEstimate > 30 || sceneDraftEstimate.length > 1 || script.length > 6000;
   const latestScene = scenes[0] ?? null;
   const sceneTimeline = useMemo(() => {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
@@ -659,8 +708,13 @@ export default function Home() {
 
   function routeLongScriptToBatchImport() {
     setBatchImportText(script);
+    setBatchAdaptation(null);
+    setAdaptationCompileContext(null);
+    setBatchDrafts(scriptInputAssessment.shouldAdaptFirst ? [] : splitScriptIntoScenes(script, episodeNumber));
     setActiveTab('states');
-    setNotice(`当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，并识别到 ${sceneDraftEstimate.length} 个场次标题` : ''}。已放入“整集批量导入”，请先自动拆场，再逐场编译。`);
+    setNotice(scriptInputAssessment.shouldAdaptFirst
+      ? `系统判断这段内容更像小说、人物设定或故事梗概（${scriptInputAssessment.reasons.join('；')}）。已转到改编区，请点击“AI精简并拆场”，不要直接当作单场戏编译。`
+      : `当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，已先合并为 ${sceneDraftEstimate.length} 个原文场景草稿` : ''}。请确认场界后逐场编译。`);
   }
 
   async function requestAI(body: Record<string, unknown>) {
@@ -672,14 +726,15 @@ export default function Home() {
         episodeNumber,
         projectId: project?.id || DEFAULT_PROJECT_ID,
         ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
+        ...(adaptationCompileContext ? { adaptationContext: adaptationCompileContext } : {}),
       }),
       signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
     });
-    const payload = await response.json() as {
+    const payload = await readApiJson<{
       result?: AnalysisResult;
       error?: string;
       meta?: { previousSceneNumber?: number | null };
-    };
+    }>(response, '智能分析返回格式异常，请稍后再试。');
     if (!response.ok || !payload.result) throw new Error(payload.error || '智能分析失败');
     setPreviousSceneNumber(payload.meta?.previousSceneNumber ?? null);
     return payload.result;
@@ -747,7 +802,7 @@ export default function Home() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ script, analysis, projectId: project?.id || DEFAULT_PROJECT_ID, ...(loadedSceneId ? { sceneId: loadedSceneId } : {}) }),
         });
-        const payload = await response.json() as { result?: StoryboardResult; error?: string };
+        const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜服务返回格式异常，请稍后再试。');
         if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
         nextStoryboard = payload.result;
       } catch {
@@ -781,7 +836,7 @@ export default function Home() {
               ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
             }),
           });
-          const payload = await response.json() as { result?: StoryboardResult; error?: string };
+          const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜修复返回格式异常，请稍后再试。');
           if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
           nextStoryboard = payload.result;
         } catch {
@@ -886,7 +941,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ script, analysis: result, projectId: project?.id || DEFAULT_PROJECT_ID, ...(loadedSceneId ? { sceneId: loadedSceneId } : {}) }),
       });
-      const payload = await response.json() as { result?: StoryboardResult; error?: string };
+      const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜服务返回格式异常，请稍后再试。');
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
       setStoryboard(payload.result);
       setDeliveryShotStatuses(activeSavedScene ? getPersistedDeliveryStatuses(payload.result) : {});
@@ -914,7 +969,7 @@ export default function Home() {
           ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
         }),
       });
-      const payload = await response.json() as { result?: StoryboardResult; error?: string };
+      const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜修复返回格式异常，请稍后再试。');
       if (!response.ok || !payload.result) throw new Error(payload.error || '分镜修复失败');
       setStoryboard(payload.result);
       setDeliveryShotStatuses({});
@@ -944,10 +999,10 @@ export default function Home() {
           deliveryTracking: { statuses: deliveryShotStatuses },
         }),
       });
-      const payload = await response.json() as {
+      const payload = await readApiJson<{
         saved?: { id: string; sceneNumber: number; episodeNumber: number; sceneOrder: number; episodeSceneNumber: number | null; updated: boolean };
         error?: string;
-      };
+      }>(response, '场次保存返回格式异常，请稍后重试。');
       if (!response.ok || !payload.saved) throw new Error(payload.error || '场次状态保存失败');
       invalidateEpisodeAIReview(payload.saved.episodeNumber);
       await Promise.all([loadScenes(), loadProject()]);
@@ -961,6 +1016,7 @@ export default function Home() {
   }
 
   function startNextScene() {
+    setAdaptationCompileContext(null);
     setScript('');
     setResult(analyzeScript(''));
     setSource('local');
@@ -987,7 +1043,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, action: direction }),
       });
-      const payload = await response.json() as { moved?: boolean; error?: string };
+      const payload = await readApiJson<{ moved?: boolean; error?: string }>(response, '场次顺序返回格式异常，请稍后重试。');
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
         const movedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
@@ -1011,7 +1067,7 @@ export default function Home() {
       const response = await fetch(`/api/scenes?id=${encodeURIComponent(scene.id)}&projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`, {
         method: 'DELETE',
       });
-      const payload = await response.json() as { scenes?: StoredScene[]; error?: string };
+      const payload = await readApiJson<{ scenes?: StoredScene[]; error?: string }>(response, '场次删除返回格式异常，请稍后重试。');
       if (!response.ok || !payload.scenes) throw new Error(payload.error || '场次删除失败');
       setScenes(payload.scenes);
       invalidateEpisodeAIReview(scene.episodeNumber);
@@ -1035,7 +1091,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, targetSceneId, action: 'move-before' }),
       });
-      const payload = await response.json() as { moved?: boolean; error?: string };
+      const payload = await readApiJson<{ moved?: boolean; error?: string }>(response, '场次顺序返回格式异常，请稍后重试。');
       if (!response.ok) throw new Error(payload.error || '场次顺序调整失败');
       if (payload.moved) {
         const movedEpisode = scenes.find((scene) => scene.id === sceneId)?.episodeNumber;
@@ -1089,7 +1145,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, deliveryTracking: { statuses } }),
       });
-      const payload = await response.json() as { tracking?: StoredScene['deliveryTracking']; error?: string };
+      const payload = await readApiJson<{ tracking?: StoredScene['deliveryTracking']; error?: string }>(response, '制作进度返回格式异常，请稍后重试。');
       if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
       await Promise.all([loadScenes(), loadProject()]);
       setNotice('制作进度已保存，刷新页面后仍可继续。');
@@ -1195,7 +1251,7 @@ export default function Home() {
         }),
         signal: AbortSignal.timeout(56000),
       });
-      const payload = await response.json() as { review?: VisualReview; error?: string };
+      const payload = await readApiJson<{ review?: VisualReview; error?: string }>(response, '视觉检查返回格式异常，请稍后再试。');
       if (!response.ok || !payload.review) throw new Error(payload.error || '视觉检查失败');
       setVisualReview(payload.review);
       if (loadedSceneId) void loadVisualReviewHistory(loadedSceneId);
@@ -1225,7 +1281,7 @@ export default function Home() {
             body: JSON.stringify({ script: testCase.script, mode: 'analyze', projectId: project?.id || DEFAULT_PROJECT_ID }),
             signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
           });
-          const payload = await response.json() as { result?: AnalysisResult; error?: string };
+          const payload = await readApiJson<{ result?: AnalysisResult; error?: string }>(response, '评测分析返回格式异常，请稍后再试。');
           if (!response.ok || !payload.result) throw new Error(payload.error || '模型未返回结果');
           modelResults.push(evaluateCase(testCase, payload.result));
         } catch (error) {
@@ -1302,7 +1358,10 @@ export default function Home() {
                 <Textarea
                   aria-label="原始剧本输入"
                   value={script}
-                  onChange={(event) => setScript(event.target.value)}
+                  onChange={(event) => {
+                    setScript(event.target.value);
+                    setAdaptationCompileContext(null);
+                  }}
                   className="min-h-[310px] resize-y border-0 bg-[#f8f4ed] p-4 font-[var(--font-script)] text-[15px] leading-8 shadow-inner focus-visible:ring-primary/20"
                   placeholder="在这里输入一场戏……"
                 />
@@ -1313,22 +1372,22 @@ export default function Home() {
                 )}
                 {shouldSuggestBatchImport && (
                   <div className="mt-3 flex flex-col justify-between gap-3 rounded-lg border border-sky-200 bg-sky-50 px-3 py-2.5 text-xs leading-5 text-sky-900 sm:flex-row sm:items-center">
-                    <div><p className="font-semibold">这段内容可能不止一场戏</p><p className="mt-0.5">当前检测到约 {localStructureEstimate} 个结构单元。单场编译更稳定，建议先按场次拆分；系统不会把这个估算值当成剧本事实。</p></div>
-                    <Button size="sm" variant="outline" onClick={routeLongScriptToBatchImport} disabled={busy}><GitBranch data-icon="inline-start" />转到批量拆场</Button>
+                    <div><p className="font-semibold">{scriptInputAssessment.shouldAdaptFirst ? '这段内容更像小说或故事梗概' : '这段内容可能不止一场戏'}</p><p className="mt-0.5">{scriptInputAssessment.shouldAdaptFirst ? `检测依据：${scriptInputAssessment.reasons.join('；')}。请先压缩主线并转换为完整场景。` : `当前检测到约 ${localStructureEstimate} 个结构单元。单场编译更稳定，建议先按场次拆分；系统不会把这个估算值当成剧本事实。`}</p></div>
+                    <Button size="sm" variant="outline" onClick={routeLongScriptToBatchImport} disabled={busy}><GitBranch data-icon="inline-start" />{scriptInputAssessment.shouldAdaptFirst ? '转到精简改编' : '转到批量拆场'}</Button>
                   </div>
                 )}
                 <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                  <button className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" onClick={() => setScript(sampleScript)}>
+                  <button className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline" onClick={() => { setScript(sampleScript); setAdaptationCompileContext(null); }}>
                     恢复示例剧本
                   </button>
                   <div className="flex flex-wrap gap-2">
                     <Button size="lg" onClick={runAnalysis} disabled={!script.trim() || busy} className="px-4">
                       {isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
-                      {isRunning ? '智能编译中…' : 'AI 编译这场戏'}
+                      {isRunning ? '智能编译中…' : scriptInputAssessment.shouldAdaptFirst ? '先精简改编' : shouldSuggestBatchImport ? '先拆分场次' : 'AI 编译这场戏'}
                     </Button>
                     <Button size="lg" variant="outline" onClick={runFullPipeline} disabled={!script.trim() || busy} className="px-4">
                       {isPipelineRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Sparkles data-icon="inline-start" />}
-                      {isPipelineRunning ? '全流程运行中…' : '运行全流程'}
+                      {isPipelineRunning ? '全流程运行中…' : scriptInputAssessment.shouldAdaptFirst ? '先精简再运行' : shouldSuggestBatchImport ? '先拆分再运行' : '运行全流程'}
                     </Button>
                   </div>
                 </div>
@@ -1875,25 +1934,42 @@ export default function Home() {
                   <div className="mb-4 rounded-xl border border-orange-200 bg-orange-50/60 p-4">
                     <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
                       <div className="min-w-0">
-                        <p className="text-sm font-semibold text-orange-950">整集批量导入与自动拆场</p>
-                        <p className="mt-1 text-xs leading-5 text-orange-900">粘贴带“第X场 / 场景X / INT.”标题的整集剧本，系统会拆成可逐场编译的草稿，不会直接覆盖已有场次。</p>
+                        <p className="text-sm font-semibold text-orange-950">小说/长剧本 → 短剧精简改编与分场</p>
+                        <p className="mt-1 text-xs leading-5 text-orange-900">“AI精简并拆场”会删除重复铺陈，保留主题、核心人物、主线、反转与高潮，再生成少量完整场景；“仅合并原文”不会删剧情，只把过短段落合并成较大的事件单元。</p>
                       </div>
-                      <Button variant="outline" onClick={splitBatchImport} disabled={busy || !batchImportText.trim()}><GitBranch data-icon="inline-start" />自动拆场</Button>
+                      <div className="flex flex-wrap gap-2">
+                        <Button onClick={() => void adaptBatchImport()} disabled={busy || !batchImportText.trim()}>{isBatchAdapting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Sparkles data-icon="inline-start" />}{isBatchAdapting ? '正在精简改编…' : 'AI精简并拆场'}</Button>
+                        <Button variant="outline" onClick={splitBatchImport} disabled={busy || !batchImportText.trim()}><GitBranch data-icon="inline-start" />仅合并原文</Button>
+                      </div>
                     </div>
                     <Textarea
                       aria-label="整集剧本批量导入"
                       value={batchImportText}
-                      onChange={(event) => setBatchImportText(event.target.value)}
+                      onChange={(event) => {
+                        setBatchImportText(event.target.value);
+                        setBatchAdaptation(null);
+                        setBatchDrafts([]);
+                      }}
                       className="mt-3 min-h-28 bg-white"
                       placeholder={'第1场 客厅\n林晓：你什么时候辞职的？\n\n第2场 公司门口\n父亲：这件事我会解释。'}
                       disabled={busy}
                     />
+                    {batchAdaptation && (
+                      <div className="mt-3 rounded-lg border border-violet-200 bg-violet-50/70 p-3 text-xs leading-5 text-violet-950">
+                        <div className="flex flex-wrap items-center gap-2"><Badge className="bg-violet-700">AI改编提纲</Badge><span>预计总时长约 {Math.ceil(batchAdaptation.estimatedTotalDurationSec / 60)} 分钟</span></div>
+                        <p className="mt-2"><span className="font-semibold">主题：</span>{batchAdaptation.theme}</p>
+                        <p><span className="font-semibold">主线：</span>{batchAdaptation.logline}</p>
+                        <p><span className="font-semibold">核心人物：</span>{batchAdaptation.characters.join('、') || '待人工确认'}</p>
+                        {batchAdaptation.retainedPlotPoints.length > 0 && <p><span className="font-semibold">重点保留：</span>{batchAdaptation.retainedPlotPoints.join('；')}</p>}
+                        {batchAdaptation.omittedContent.length > 0 && <p className="text-violet-800"><span className="font-semibold">压缩/合并：</span>{batchAdaptation.omittedContent.join('；')}</p>}
+                      </div>
+                    )}
                     {batchDrafts.length > 0 && (
                       <div className="mt-3 space-y-2">
-                        <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold text-orange-950">已拆分 {batchDrafts.length} 个场次草稿</p><Button size="sm" variant="ghost" onClick={() => setBatchDrafts([])} disabled={busy}>清空草稿</Button></div>
+                        <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold text-orange-950">{batchAdaptation ? '已精简改编' : '已合并'} {batchDrafts.length} 个完整场次</p><Button size="sm" variant="ghost" onClick={() => { setBatchDrafts([]); setBatchAdaptation(null); setAdaptationCompileContext(null); }} disabled={busy}>清空草稿</Button></div>
                         {batchDrafts.map((draft, index) => (
                           <div key={`${draft.title}-${index}`} className="flex flex-col justify-between gap-2 rounded-lg border border-orange-100 bg-white/80 p-3 sm:flex-row sm:items-center">
-                            <div className="min-w-0"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p><p className="mt-1 line-clamp-2 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
+                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p>{draft.splitReason === 'adapted' ? <Badge className="bg-violet-700">AI精简场景</Badge> : draft.splitReason !== 'heading' && <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">待确认场界</Badge>}{draft.narrativeRole && <Badge variant="outline">{draft.narrativeRole}</Badge>}{draft.estimatedDurationSec && <span className="text-[11px] text-muted-foreground">约 {draft.estimatedDurationSec} 秒</span>}{draft.timeMarker && <Badge variant="outline">{draft.timeMarker}</Badge>}</div>{draft.retainedHighlights && draft.retainedHighlights.length > 0 && <p className="mt-1 text-[11px] text-violet-700">保留亮点：{draft.retainedHighlights.join('、')}</p>}{draft.appearingCharacters && draft.appearingCharacters.length > 0 && <p className="mt-1 text-[11px] text-muted-foreground">出场人物：{draft.appearingCharacters.join('、')}</p>}<p className="mt-1 line-clamp-3 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
                             <Button size="sm" variant="outline" onClick={() => loadBatchDraft(draft)} disabled={busy}>载入编译</Button>
                           </div>
                         ))}
