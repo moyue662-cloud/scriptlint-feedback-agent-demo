@@ -11,11 +11,13 @@ export async function GET(request: Request) {
   const unauthorized = await requireAuth(request);
   if (unauthorized) return unauthorized;
   try {
+    const url = new URL(request.url);
+    const projectId = url.searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
     const [project, summaries, scenes, aiReviews] = await Promise.all([
-      getProject(DEFAULT_PROJECT_ID),
-      listEpisodeSummaries(DEFAULT_PROJECT_ID),
-      listSceneDetails(DEFAULT_PROJECT_ID, 500),
-      listEpisodeAIReviews(DEFAULT_PROJECT_ID),
+      getProject(projectId),
+      listEpisodeSummaries(projectId),
+      listSceneDetails(projectId, 500),
+      listEpisodeAIReviews(projectId),
     ]);
     if (!project) return Response.json({ error: '项目尚未初始化。' }, { status: 404 });
     const episodeNumbers = Array.from(new Set([
@@ -36,7 +38,6 @@ export async function GET(request: Request) {
       };
     }));
     const ready = episodes.length > 0 && episodes.every((episode) => episode.review.status === 'ready' && passesEpisodeAIReviewGate(episode.aiReview));
-    const url = new URL(request.url);
     if (url.searchParams.get('format') === 'production') {
       const aspectRatio: ProjectDeliveryAspectRatio = url.searchParams.get('aspectRatio') === '16:9' ? '16:9' : '9:16';
       const productionPackage = buildProjectProductionPackage({ project, scenes, ready, aspectRatio });

@@ -2,9 +2,9 @@
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type SyntheticEvent } from 'react';
 import {
-  AlertTriangle, ArrowDown, ArrowRight, ArrowUp, BrainCircuit, Check, ChevronRight, Clipboard, Download,
+  AlertTriangle, Archive, ArrowDown, ArrowRight, ArrowUp, BrainCircuit, Check, ChevronRight, Clipboard, Download,
   Camera, Clock, Database, FileText, Film, GitBranch, GripVertical, ImagePlus, Loader2, Play,
-  LockKeyhole, LogOut, PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Upload, Users,
+  LockKeyhole, LogOut, PackageCheck, Plus, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Upload, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -155,6 +155,8 @@ const batchCompilePhaseLabels: Record<BatchCompilePhase, string> = {
   complete: '已完成', failed: '需要处理',
 };
 
+const scriptStorageKey = (projectId: string) => `scene-flow-script:${projectId}`;
+
 const pipeline = [
   { id: '01', label: '剧本理解', icon: FileText },
   { id: '02', label: '交互节拍', icon: GitBranch },
@@ -199,7 +201,11 @@ export default function Home() {
   const [draggingSceneId, setDraggingSceneId] = useState<string | null>(null);
   const [dragOverSceneId, setDragOverSceneId] = useState<string | null>(null);
   const [project, setProject] = useState<SceneProject | null>(null);
+  const [projects, setProjects] = useState<SceneProject[]>([]);
   const [projectName, setProjectName] = useState('');
+  const [newProjectName, setNewProjectName] = useState('');
+  const [isProjectCreating, setIsProjectCreating] = useState(false);
+  const [isProjectSwitching, setIsProjectSwitching] = useState(false);
   const [isProjectSaving, setIsProjectSaving] = useState(false);
   const [isProjectApprovalSaving, setIsProjectApprovalSaving] = useState(false);
   const [isProjectExporting, setIsProjectExporting] = useState(false);
@@ -234,9 +240,9 @@ export default function Home() {
   const deliverySaveQueue = useRef<Promise<void>>(Promise.resolve());
   const [activeTab, setActiveTab] = useState('beats');
 
-  async function loadScenes() {
+  async function loadScenes(targetProjectId = project?.id || DEFAULT_PROJECT_ID) {
     try {
-      const response = await fetch('/api/scenes');
+      const response = await fetch(`/api/scenes?projectId=${encodeURIComponent(targetProjectId)}`);
       const payload = await readApiJson<{ scenes?: StoredScene[] }>(response, '场次列表返回格式异常。');
       if (response.ok && payload.scenes) setScenes(payload.scenes);
     } catch {
@@ -244,9 +250,9 @@ export default function Home() {
     }
   }
 
-  async function loadEpisodeSummaries() {
+  async function loadEpisodeSummaries(targetProjectId = project?.id || DEFAULT_PROJECT_ID) {
     try {
-      const response = await fetch('/api/episodes');
+      const response = await fetch(`/api/episodes?projectId=${encodeURIComponent(targetProjectId)}`);
       const payload = await readApiJson<{ summaries?: EpisodeSummary[] }>(response, '集数总结返回格式异常。');
       if (response.ok && payload.summaries) setEpisodeSummaries(payload.summaries);
     } catch {
@@ -254,9 +260,9 @@ export default function Home() {
     }
   }
 
-  async function loadEpisodeAIReviews() {
+  async function loadEpisodeAIReviews(targetProjectId = project?.id || DEFAULT_PROJECT_ID) {
     try {
-      const response = await fetch('/api/episodes/review');
+      const response = await fetch(`/api/episodes/review?projectId=${encodeURIComponent(targetProjectId)}`);
       const payload = await readApiJson<{ reviews?: EpisodeAIReview[] }>(response, '整集审查记录返回格式异常。');
       if (response.ok && payload.reviews) setEpisodeAIReviews(payload.reviews);
     } catch {
@@ -268,13 +274,15 @@ export default function Home() {
     setEpisodeAIReviews((current) => current.filter((review) => review.episodeNumber !== targetEpisode));
   }
 
-  async function loadProject() {
+  async function loadProject(targetProjectId = project?.id || DEFAULT_PROJECT_ID) {
     try {
-      const response = await fetch('/api/project');
-      const payload = await readApiJson<{ project?: SceneProject }>(response, '项目资料返回格式异常。');
+      const response = await fetch(`/api/project?projectId=${encodeURIComponent(targetProjectId)}`);
+      const payload = await readApiJson<{ project?: SceneProject; projects?: SceneProject[] }>(response, '项目资料返回格式异常。');
       if (response.ok && payload.project) {
         setProject(payload.project);
         setProjectName(payload.project.name);
+        if (payload.projects) setProjects(payload.projects);
+        window.localStorage.setItem('scene-flow-project-id', payload.project.id);
       }
     } catch {
       // Project metadata is non-blocking; the scene workflow remains usable if it is unavailable.
@@ -282,21 +290,22 @@ export default function Home() {
   }
 
   function loadWorkspace() {
-    const saved = window.localStorage.getItem('scene-flow-script');
+    const targetProjectId = window.localStorage.getItem('scene-flow-project-id') || DEFAULT_PROJECT_ID;
+    const saved = window.localStorage.getItem(`scene-flow-script:${targetProjectId}`);
     if (saved) {
       setScript(saved);
       setResult(analyzeScript(saved));
     }
-    void loadScenes();
-    void loadEpisodeSummaries();
-    void loadEpisodeAIReviews();
-    void loadProject();
-    void loadBatchRun();
+    void loadScenes(targetProjectId);
+    void loadEpisodeSummaries(targetProjectId);
+    void loadEpisodeAIReviews(targetProjectId);
+    void loadProject(targetProjectId);
+    void loadBatchRun(targetProjectId);
   }
 
-  async function loadBatchRun() {
+  async function loadBatchRun(targetProjectId = project?.id || DEFAULT_PROJECT_ID) {
     try {
-      const response = await fetch(`/api/batch-runs?projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
+      const response = await fetch(`/api/batch-runs?projectId=${encodeURIComponent(targetProjectId)}`);
       const payload = await readApiJson<{ run?: BatchCompileRun | null }>(response, '批量任务返回格式异常。');
       if (!response.ok || !payload.run) return;
       setBatchRunId(payload.run.id);
@@ -358,7 +367,7 @@ export default function Home() {
   function applySceneDetail(detail: StoredSceneDetail) {
     setAdaptationCompileContext(null);
     setScript(detail.script);
-    window.localStorage.setItem('scene-flow-script', detail.script);
+    window.localStorage.setItem(scriptStorageKey(project?.id || DEFAULT_PROJECT_ID), detail.script);
     setResult(detail.analysis);
     setSource('saved');
     setLoopCount(0);
@@ -455,7 +464,7 @@ export default function Home() {
     setEpisodeNumber(draft.episodeNumber);
     setSceneTitle(draft.title);
     setScript(draft.script);
-    window.localStorage.setItem('scene-flow-script', draft.script);
+    window.localStorage.setItem(scriptStorageKey(project?.id || DEFAULT_PROJECT_ID), draft.script);
     setResult(analyzeScript(draft.script));
     setSource('local');
     setStoryboard(null);
@@ -640,7 +649,7 @@ export default function Home() {
           setReviewedShotIds([]);
           setDeliveryShotStatuses({});
           setLoadedSceneId(savePayload.saved.id);
-          window.localStorage.setItem('scene-flow-script', draft.script);
+          window.localStorage.setItem(scriptStorageKey(project?.id || DEFAULT_PROJECT_ID), draft.script);
         } catch (error) {
           const message = error instanceof Error ? error.message : '批量编译失败';
           const failedItem: BatchCompileItem = { phase: 'failed', detail: `停在第 ${index + 1} 场`, error: message };
@@ -707,7 +716,7 @@ export default function Home() {
       const response = await fetch('/api/project', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: projectName }),
+        body: JSON.stringify({ name: projectName, projectId: project?.id || DEFAULT_PROJECT_ID }),
       });
       const payload = await readApiJson<{ project?: SceneProject; error?: string }>(response, '项目资料保存返回格式异常，请稍后重试。');
       if (!response.ok || !payload.project) throw new Error(payload.error || '项目资料保存失败');
@@ -721,6 +730,91 @@ export default function Home() {
     }
   }
 
+  function clearProjectWorkspace(targetProjectId: string) {
+    const saved = window.localStorage.getItem(scriptStorageKey(targetProjectId)) || '';
+    setScript(saved);
+    setResult(analyzeScript(saved));
+    setSource('local');
+    setScenes([]);
+    setEpisodeSummaries([]);
+    setEpisodeAIReviews([]);
+    setLoadedSceneId(null);
+    setStoryboard(null);
+    setReviewedShotIds([]);
+    setDeliveryShotStatuses({});
+    setBatchImportText('');
+    setBatchDrafts([]);
+    setBatchAdaptation(null);
+    setBatchCompileItems([]);
+    setBatchRunId(null);
+    setVisualFiles([]);
+    setVisualReview(null);
+    setVisualReviewHistory([]);
+  }
+
+  async function switchProject(targetProject: SceneProject, force = false) {
+    if ((!force && busy) || targetProject.id === project?.id) return;
+    setIsProjectSwitching(true);
+    setNotice('');
+    try {
+      clearProjectWorkspace(targetProject.id);
+      setProject(targetProject);
+      setProjectName(targetProject.name);
+      window.localStorage.setItem('scene-flow-project-id', targetProject.id);
+      await Promise.all([
+        loadScenes(targetProject.id), loadEpisodeSummaries(targetProject.id), loadEpisodeAIReviews(targetProject.id),
+        loadProject(targetProject.id), loadBatchRun(targetProject.id),
+      ]);
+      setNotice(`已切换到“${targetProject.name}”，场次和审查状态已独立载入。`);
+    } finally {
+      setIsProjectSwitching(false);
+    }
+  }
+
+  async function createNewProject() {
+    if (!newProjectName.trim() || busy) return;
+    setIsProjectCreating(true);
+    setNotice('');
+    try {
+      const response = await fetch('/api/project', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newProjectName.trim() }),
+      });
+      const payload = await readApiJson<{ project?: SceneProject; projects?: SceneProject[]; error?: string }>(response, '新项目返回格式异常。');
+      if (!response.ok || !payload.project) throw new Error(payload.error || '新项目创建失败');
+      if (payload.projects) setProjects(payload.projects);
+      setNewProjectName('');
+      await switchProject(payload.project, true);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '新项目创建失败，请稍后重试。');
+    } finally {
+      setIsProjectCreating(false);
+    }
+  }
+
+  async function archiveCurrentProject() {
+    if (!project || projects.length <= 1 || busy) return;
+    if (!window.confirm(`归档“${project.name}”？项目数据会保留，但不会再显示在项目列表中。`)) return;
+    setIsProjectSwitching(true);
+    try {
+      await cancelCurrentBatchRun();
+      const response = await fetch(`/api/project?projectId=${encodeURIComponent(project.id)}`, { method: 'DELETE' });
+      const payload = await readApiJson<{ project?: SceneProject | null; projects?: SceneProject[]; error?: string }>(response, '项目归档返回格式异常。');
+      if (!response.ok || !payload.project) throw new Error(payload.error || '项目归档失败');
+      setProjects(payload.projects ?? []);
+      clearProjectWorkspace(payload.project.id);
+      setProject(payload.project);
+      setProjectName(payload.project.name);
+      window.localStorage.setItem('scene-flow-project-id', payload.project.id);
+      await Promise.all([loadScenes(payload.project.id), loadEpisodeSummaries(payload.project.id), loadEpisodeAIReviews(payload.project.id), loadBatchRun(payload.project.id)]);
+      setNotice('原项目已归档，并已切换到其他项目。');
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '项目归档失败，请稍后重试。');
+    } finally {
+      setIsProjectSwitching(false);
+    }
+  }
+
   async function updateProjectApproval(approved: boolean) {
     if (busy) return;
     setIsProjectApprovalSaving(true);
@@ -729,7 +823,7 @@ export default function Home() {
       const response = await fetch('/api/project', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ approved }),
+        body: JSON.stringify({ approved, projectId: project?.id || DEFAULT_PROJECT_ID }),
       });
       const payload = await readApiJson<{ project?: SceneProject; error?: string }>(response, '项目终审返回格式异常，请稍后重试。');
       if (!response.ok || !payload.project) throw new Error(payload.error || '项目终审状态保存失败');
@@ -748,7 +842,7 @@ export default function Home() {
     setIsProjectExporting(true);
     setNotice('');
     try {
-      const response = await fetch('/api/export');
+      const response = await fetch(`/api/export?projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
       const payload = await readApiJson<Record<string, unknown> & { error?: string }>(response, '项目执行包返回格式异常，请稍后重试。');
       if (!response.ok) throw new Error(payload.error || '项目执行包生成失败');
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' });
@@ -772,7 +866,7 @@ export default function Home() {
     setIsProjectExporting(true);
     setNotice('');
     try {
-      const response = await fetch(`/api/export?format=production&aspectRatio=${encodeURIComponent(deliveryAspectRatio)}${output === 'markdown' ? '&output=markdown' : ''}`);
+      const response = await fetch(`/api/export?projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}&format=production&aspectRatio=${encodeURIComponent(deliveryAspectRatio)}${output === 'markdown' ? '&output=markdown' : ''}`);
       const raw = await response.text();
       if (!response.ok) {
         let message = '整部短剧制作包生成失败';
@@ -890,7 +984,7 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating || isBatchAdapting || isBatchCompiling;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectCreating || isProjectSwitching || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating || isBatchAdapting || isBatchCompiling;
   const batchCompletedCount = batchCompileItems.filter((item) => item.phase === 'complete').length;
   const batchFailedIndex = batchCompileItems.findIndex((item) => item.phase === 'failed');
   const localStructureEstimate = useMemo(() => script.trim() ? analyzeScript(script).beats.length : 0, [script]);
@@ -1087,7 +1181,7 @@ export default function Home() {
     setPipelinePhase('analyzing');
     setPipelineStep('正在读取原始剧本并建立交互节拍');
     setNotice('');
-    window.localStorage.setItem('scene-flow-script', script);
+    window.localStorage.setItem(scriptStorageKey(project?.id || DEFAULT_PROJECT_ID), script);
     setLoopCount(0);
     setStoryboardLoopCount(0);
     setStoryboard(null);
@@ -1211,7 +1305,7 @@ export default function Home() {
     }
     setIsRunning(true);
     setNotice('');
-    window.localStorage.setItem('scene-flow-script', script);
+    window.localStorage.setItem(scriptStorageKey(project?.id || DEFAULT_PROJECT_ID), script);
     try {
       const next = await requestAI({ script, mode: 'analyze' });
       setResult(next);
@@ -1372,7 +1466,7 @@ export default function Home() {
     setEpisodeNumber(latestScene?.episodeNumber ?? 1);
     setPreviousSceneNumber(latestScene ? episodeSceneNumbers.get(latestScene.id) ?? latestScene.sceneOrder : null);
     setNotice(latestScene ? `已载入第 ${latestScene.episodeNumber} 集第 ${episodeSceneNumbers.get(latestScene.id) ?? latestScene.sceneOrder} 场结束状态，请输入下一场剧本。` : '请输入下一场剧本。');
-    window.localStorage.setItem('scene-flow-script', '');
+    window.localStorage.setItem(scriptStorageKey(project?.id || DEFAULT_PROJECT_ID), '');
   }
 
   async function moveScene(sceneId: string, direction: 'move-up' | 'move-down') {
@@ -2025,15 +2119,24 @@ export default function Home() {
               <TabsContent value="states" className="m-0">
                 <CardContent className="py-4">
                   <div className="mb-4 rounded-xl border border-border bg-card p-4">
-                    <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-end">
-                      <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold">项目资料</p>
-                        <p className="mt-1 text-xs text-muted-foreground">项目内场次会按顺序保存，状态继承只在当前项目中生效。</p>
-                        <Input aria-label="项目名称" value={projectName} onChange={(event) => setProjectName(event.target.value)} className="mt-3 max-w-md" placeholder="例如：林晓与父亲" disabled={busy} />
+                    <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
+                      <div className="min-w-0 flex-1 space-y-3">
+                        <div><p className="text-sm font-semibold">项目管理</p><p className="mt-1 text-xs text-muted-foreground">每个短剧拥有独立的场次、连续性状态、审查记录、批量任务和执行包。</p></div>
+                        <div className="grid gap-2 md:grid-cols-[minmax(180px,1fr)_minmax(180px,1fr)_auto]">
+                          <NativeSelect aria-label="切换短剧项目" value={project?.id || ''} onChange={(event) => { const target = projects.find((item) => item.id === event.target.value); if (target) void switchProject(target); }} disabled={busy}>
+                            {projects.map((item) => <NativeSelectOption key={item.id} value={item.id}>{item.name}</NativeSelectOption>)}
+                          </NativeSelect>
+                          <Input aria-label="项目名称" value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="当前项目名称" disabled={busy} />
+                          <Button variant="outline" onClick={saveProjectName} disabled={!projectName.trim() || busy}>{isProjectSaving ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}{isProjectSaving ? '保存中…' : '重命名'}</Button>
+                        </div>
+                        <div className="grid gap-2 md:grid-cols-[minmax(220px,1fr)_auto_auto]">
+                          <Input aria-label="新项目名称" value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} placeholder="输入名称，新建另一部短剧" maxLength={80} disabled={busy} />
+                          <Button onClick={() => void createNewProject()} disabled={!newProjectName.trim() || busy}>{isProjectCreating ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Plus data-icon="inline-start" />}新建项目</Button>
+                          <Button variant="ghost" onClick={() => void archiveCurrentProject()} disabled={projects.length <= 1 || busy}><Archive data-icon="inline-start" />归档当前项目</Button>
+                        </div>
                       </div>
-                      <Button variant="outline" onClick={saveProjectName} disabled={!projectName.trim() || busy}>{isProjectSaving ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Save data-icon="inline-start" />}{isProjectSaving ? '保存中…' : '保存项目名'}</Button>
                     </div>
-                    {project && <p className="mt-2 text-[11px] text-muted-foreground">当前项目：{project.name} · 已保存 {scenes.length} 场</p>}
+                    {project && <p className="mt-3 text-xs text-muted-foreground">当前项目：{project.name} · 已保存 {scenes.length} 场{isProjectSwitching ? ' · 正在切换…' : ''}</p>}
                   </div>
                   <div className="mb-4 rounded-xl border border-sky-200 bg-sky-50/60 p-4">
                     <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">

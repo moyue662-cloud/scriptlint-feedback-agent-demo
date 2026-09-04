@@ -84,6 +84,7 @@ export interface SceneProject {
   id: string;
   name: string;
   approvedAt: string | null;
+  archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }

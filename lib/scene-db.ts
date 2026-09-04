@@ -46,6 +46,7 @@ interface ProjectRow {
   id: string;
   name: string;
   approved_at?: string | null;
+  archived_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -254,6 +255,7 @@ function toSceneProject(row: ProjectRow): SceneProject {
     id: row.id,
     name: row.name,
     approvedAt: row.approved_at ?? null,
+    archivedAt: row.archived_at ?? null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -424,9 +426,40 @@ export async function restoreSceneVersion(input: { sceneId: string; versionId: s
 export async function getProject(id = DEFAULT_PROJECT_ID) {
   await ensureSchema();
   const row = await database().prepare(
-    'SELECT id, name, approved_at, created_at, updated_at FROM projects WHERE id = ?',
+    'SELECT id, name, approved_at, archived_at, created_at, updated_at FROM projects WHERE id = ? AND archived_at IS NULL',
   ).bind(id).first<ProjectRow>();
   return row ? toSceneProject(row) : null;
+}
+
+export async function listProjects() {
+  await ensureSchema();
+  const result = await database().prepare(
+    'SELECT id, name, approved_at, archived_at, created_at, updated_at FROM projects WHERE archived_at IS NULL ORDER BY updated_at DESC, created_at DESC',
+  ).all<ProjectRow>();
+  return result.results.map(toSceneProject);
+}
+
+export async function createProject(name: string) {
+  await ensureSchema();
+  const trimmed = name.trim().slice(0, 80);
+  if (!trimmed) throw new Error('项目名称不能为空');
+  const id = crypto.randomUUID();
+  const now = new Date().toISOString();
+  await database().prepare(
+    'INSERT INTO projects (id, name, approved_at, archived_at, created_at, updated_at) VALUES (?, ?, NULL, NULL, ?, ?)',
+  ).bind(id, trimmed, now, now).run();
+  return (await getProject(id))!;
+}
+
+export async function archiveProject(id: string) {
+  await ensureSchema();
+  const projects = await listProjects();
+  if (projects.length <= 1) throw new Error('至少保留一个项目');
+  const now = new Date().toISOString();
+  await database().prepare(
+    'UPDATE projects SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL',
+  ).bind(now, now, id).run();
+  return listProjects();
 }
 
 export async function updateProjectName(name: string, id = DEFAULT_PROJECT_ID) {
@@ -639,8 +672,8 @@ export async function saveScene(input: {
   }
 
   const latest = await database().prepare(
-    'SELECT COALESCE(MAX(scene_number), 0) AS latest FROM scene_states WHERE project_id = ?',
-  ).bind(projectId).first<{ latest: number }>();
+    'SELECT COALESCE(MAX(scene_number), 0) AS latest FROM scene_states',
+  ).first<{ latest: number }>();
   const sceneNumber = Number(latest?.latest ?? 0) + 1;
   const latestOrder = await database().prepare(
     'SELECT COALESCE(MAX(scene_order), 0) AS latest FROM scene_states WHERE project_id = ?',
