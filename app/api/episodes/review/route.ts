@@ -1,6 +1,7 @@
 import { buildEpisodeSourceHash, type EpisodeAIReview, type EpisodeAIReviewCategory, type EpisodeAIReviewIssue } from '@/lib/episode-ai-review';
 import { getEpisodeSummary, listEpisodeAIReviews, listSceneDetails, upsertEpisodeAIReview } from '@/lib/scene-db';
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
@@ -93,6 +94,8 @@ function parseReview(text: string, validSceneIds: Set<string>) {
 }
 
 export async function GET(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const projectId = new URL(request.url).searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
     const [reviews, scenes] = await Promise.all([listEpisodeAIReviews(projectId), listSceneDetails(projectId, 500)]);
@@ -112,6 +115,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as { projectId?: string; episodeNumber?: number };
     const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;

@@ -1,4 +1,5 @@
 import type { AnalysisResult } from '@/lib/script-engine';
+import { requireAuth } from '@/lib/auth';
 import { getLatestScene, getPreviousScene } from '@/lib/scene-db';
 import { DEFAULT_PROJECT_ID, inheritStoryboardOpeningState, sceneContinuityContext } from '@/lib/scene-state';
 import {
@@ -148,6 +149,8 @@ function parseOutput(text: string) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as {
       script?: string;

@@ -1,10 +1,10 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type SyntheticEvent } from 'react';
 import {
   AlertTriangle, ArrowDown, ArrowRight, ArrowUp, BrainCircuit, Check, ChevronRight, Clipboard, Download,
   Camera, Clock, Database, FileText, Film, GitBranch, GripVertical, ImagePlus, Loader2, Play,
-  PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Upload, Users,
+  LockKeyhole, LogOut, PackageCheck, RefreshCcw, Save, ScanSearch, Sparkles, Trash2, Upload, Users,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
@@ -136,6 +136,7 @@ async function extractVideoFrames(file: File) {
 }
 
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
+type AuthState = 'checking' | 'anonymous' | 'authenticated';
 type EpisodeSummaryDraft = Pick<EpisodeSummary, 'title' | 'objective' | 'conflict' | 'notes'>;
 
 const emptyEpisodeSummaryDraft: EpisodeSummaryDraft = { title: '', objective: '', conflict: '', notes: '' };
@@ -160,6 +161,10 @@ const pipeline = [
 ];
 
 export default function Home() {
+  const [authState, setAuthState] = useState<AuthState>('checking');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [script, setScript] = useState(sampleScript);
   const [result, setResult] = useState<AnalysisResult>(() => analyzeScript(sampleScript));
   const [loopCount, setLoopCount] = useState(0);
@@ -266,6 +271,53 @@ export default function Home() {
     } catch {
       // Project metadata is non-blocking; the scene workflow remains usable if it is unavailable.
     }
+  }
+
+  function loadWorkspace() {
+    const saved = window.localStorage.getItem('scene-flow-script');
+    if (saved) {
+      setScript(saved);
+      setResult(analyzeScript(saved));
+    }
+    void loadScenes();
+    void loadEpisodeSummaries();
+    void loadEpisodeAIReviews();
+    void loadProject();
+  }
+
+  async function login(event: SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!loginPassword || isLoggingIn) return;
+    setIsLoggingIn(true);
+    setLoginError('');
+    try {
+      const response = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: loginPassword }),
+      });
+      const payload = await readApiJson<{ authenticated?: boolean; error?: string }>(response, '登录响应格式异常。');
+      if (!response.ok || !payload.authenticated) throw new Error(payload.error || '登录失败');
+      setLoginPassword('');
+      setAuthState('authenticated');
+      loadWorkspace();
+    } catch (error) {
+      setLoginError(error instanceof Error ? error.message : '登录失败，请重试。');
+    } finally {
+      setIsLoggingIn(false);
+    }
+  }
+
+  async function logout() {
+    await fetch('/api/auth', { method: 'DELETE' }).catch(() => null);
+    setAuthState('anonymous');
+    setProject(null);
+    setScenes([]);
+    setEpisodeSummaries([]);
+    setEpisodeAIReviews([]);
+    setStoryboard(null);
+    setLoadedSceneId(null);
+    setNotice('');
   }
 
   async function loadVisualReviewHistory(sceneId: string) {
@@ -580,17 +632,23 @@ export default function Home() {
   }
 
   useEffect(() => {
-    const saved = window.localStorage.getItem('scene-flow-script');
-    queueMicrotask(() => {
-      if (saved) {
-        setScript(saved);
-        setResult(analyzeScript(saved));
+    let cancelled = false;
+    void (async () => {
+      try {
+        const response = await fetch('/api/auth', { cache: 'no-store' });
+        const payload = await readApiJson<{ authenticated?: boolean }>(response, '登录状态返回格式异常。');
+        if (cancelled) return;
+        if (payload.authenticated) {
+          setAuthState('authenticated');
+          loadWorkspace();
+        } else {
+          setAuthState('anonymous');
+        }
+      } catch {
+        if (!cancelled) setAuthState('anonymous');
       }
-      void loadScenes();
-      void loadEpisodeSummaries();
-      void loadEpisodeAIReviews();
-      void loadProject();
-    });
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
@@ -1334,6 +1392,54 @@ export default function Home() {
     }
   }
 
+  if (authState === 'checking') {
+    return (
+      <main className="grid min-h-screen place-items-center bg-background px-5 text-foreground">
+        <div className="flex items-center gap-3 text-sm text-muted-foreground">
+          <Loader2 className="size-5 animate-spin text-primary" />正在确认安全会话…
+        </div>
+      </main>
+    );
+  }
+
+  if (authState === 'anonymous') {
+    return (
+      <main className="grid min-h-screen place-items-center bg-background px-5 py-12 text-foreground">
+        <Card className="w-full max-w-md border-0 shadow-[0_24px_80px_rgba(56,41,35,.12)] ring-border">
+          <CardHeader className="space-y-4">
+            <div className="grid size-11 place-items-center rounded-2xl bg-primary text-primary-foreground">
+              <LockKeyhole className="size-5" />
+            </div>
+            <div>
+              <CardTitle className="text-2xl">进入剧序 SceneFlow</CardTitle>
+              <CardDescription className="mt-2 leading-6">这是受保护的个人短剧工作台。登录后才能读取、修改和导出项目数据。</CardDescription>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <form className="space-y-4" onSubmit={login}>
+              <div className="space-y-2">
+                <label className="text-sm font-medium" htmlFor="owner-password">所有者密码</label>
+                <Input
+                  id="owner-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={loginPassword}
+                  onChange={(event) => setLoginPassword(event.target.value)}
+                  placeholder="输入所有者密码"
+                />
+              </div>
+              {loginError && <output className="block rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800">{loginError}</output>}
+              <Button className="w-full" size="lg" type="submit" disabled={!loginPassword || isLoggingIn}>
+                {isLoggingIn ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <LockKeyhole data-icon="inline-start" />}
+                {isLoggingIn ? '正在登录…' : '安全登录'}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
+      </main>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-30 border-b border-border/80 bg-background/92 backdrop-blur-xl">
@@ -1355,6 +1461,9 @@ export default function Home() {
             {previousSceneNumber && <Badge variant="outline" className="hidden border-sky-200 bg-sky-50 text-sky-700 md:inline-flex">继承第 {previousSceneNumber} 场</Badge>}
             <Button variant="outline" onClick={exportResult}>
               <Download data-icon="inline-start" /> 导出执行包
+            </Button>
+            <Button variant="ghost" size="icon" aria-label="退出登录" title="退出登录" onClick={logout}>
+              <LogOut />
             </Button>
           </div>
         </div>

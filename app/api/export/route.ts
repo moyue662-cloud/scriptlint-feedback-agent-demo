@@ -2,10 +2,13 @@ import { buildEpisodeReview } from '@/lib/episode-review';
 import { buildEpisodeSourceHash, passesEpisodeAIReviewGate } from '@/lib/episode-ai-review';
 import { getProject, listEpisodeAIReviews, listEpisodeSummaries, listSceneDetails } from '@/lib/scene-db';
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
-export async function GET() {
+export async function GET(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const [project, summaries, scenes, aiReviews] = await Promise.all([
       getProject(DEFAULT_PROJECT_ID),

@@ -1,9 +1,12 @@
 import { DEFAULT_PROJECT_ID, type EpisodeSummary } from '@/lib/scene-state';
 import { listEpisodeSummaries, upsertEpisodeSummary } from '@/lib/scene-db';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
 export async function GET(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const projectId = new URL(request.url).searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
     const summaries = await listEpisodeSummaries(projectId);
@@ -15,6 +18,8 @@ export async function GET(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as Partial<EpisodeSummary> & { projectId?: string };
     const episodeNumber = Number(body.episodeNumber);

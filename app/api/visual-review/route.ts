@@ -1,5 +1,6 @@
 import { getSceneById, listSceneVisualReviews, saveSceneVisualReview } from '@/lib/scene-db';
 import { isVisualDataUrl, type VisualIssueType, type VisualReview } from '@/lib/visual-review';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
@@ -74,6 +75,8 @@ async function sourceHash(source: string) {
 }
 
 export async function GET(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   const url = new URL(request.url);
   const sceneId = url.searchParams.get('sceneId')?.trim();
   const projectId = url.searchParams.get('projectId')?.trim() || 'default';
@@ -87,6 +90,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as {
       projectId?: string;

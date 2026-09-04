@@ -2,10 +2,13 @@ import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import { buildEpisodeSourceHash, passesEpisodeAIReviewGate } from '@/lib/episode-ai-review';
 import { buildEpisodeReview } from '@/lib/episode-review';
 import { getProject, listEpisodeAIReviews, listEpisodeSummaries, listSceneDetails, setProjectApproval, updateProjectName } from '@/lib/scene-db';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
-export async function GET() {
+export async function GET(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const project = await getProject();
     if (!project) return Response.json({ error: '项目尚未初始化。' }, { status: 404 });
@@ -17,6 +20,8 @@ export async function GET() {
 }
 
 export async function PATCH(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as { name?: string; approved?: boolean };
     if (typeof body.approved === 'boolean') {

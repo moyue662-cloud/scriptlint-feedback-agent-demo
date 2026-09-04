@@ -1,4 +1,5 @@
 import { normalizeNovelAdaptation, type RawNovelAdaptation } from '@/lib/novel-adaptation';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
@@ -82,6 +83,8 @@ function parseOutput(text: string) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as { text?: string; episodeNumber?: number };
     const text = body.text?.trim() ?? '';

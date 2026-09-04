@@ -2,6 +2,7 @@ import { analyzeScript, normalizeAnalysisResult, type AnalysisResult } from '@/l
 import { getEpisodeSummary, getLatestScene, getPreviousScene } from '@/lib/scene-db';
 import { sceneContinuityContext } from '@/lib/scene-state';
 import type { AdaptationCompileContext } from '@/lib/novel-adaptation';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
@@ -171,6 +172,8 @@ function enforceBeatCompleteness(result: Omit<AnalysisResult, 'analyzedAt'>, scr
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as {
       script?: string;

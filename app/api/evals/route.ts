@@ -1,8 +1,11 @@
 import { EVAL_CASES, runLocalEvaluation } from '@/lib/eval-suite';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
-export async function GET() {
+export async function GET(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   return Response.json({
     suite: {
       id: 'sceneflow-regression-v1',

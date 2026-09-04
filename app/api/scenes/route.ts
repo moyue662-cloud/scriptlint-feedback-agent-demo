@@ -2,6 +2,7 @@ import { buildSceneSnapshot, DEFAULT_PROJECT_ID, sceneContinuityContext } from '
 import { deleteScene, getEpisodeSceneNumber, getLatestScene, getPreviousScene, getSceneById, listSceneVersions, listScenes, moveScene, moveSceneBefore, restoreSceneVersion, saveScene, updateSceneDeliveryTracking } from '@/lib/scene-db';
 import type { AnalysisResult } from '@/lib/script-engine';
 import { finalizeStoryboard, type StoryboardResult } from '@/lib/storyboard-engine';
+import { requireAuth } from '@/lib/auth';
 
 export const runtime = 'edge';
 
@@ -75,6 +76,8 @@ function isValidStoryboard(value: unknown): value is StoryboardResult {
 }
 
 export async function GET(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const sceneId = new URL(request.url).searchParams.get('id')?.trim() ?? '';
     const projectId = new URL(request.url).searchParams.get('projectId')?.trim() || DEFAULT_PROJECT_ID;
@@ -98,6 +101,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as {
       title?: string;
@@ -151,6 +156,8 @@ export async function POST(request: Request) {
 }
 
 export async function DELETE(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const url = new URL(request.url);
     const sceneId = url.searchParams.get('id')?.trim() ?? '';
@@ -167,6 +174,8 @@ export async function DELETE(request: Request) {
 }
 
 export async function PATCH(request: Request) {
+  const unauthorized = await requireAuth(request);
+  if (unauthorized) return unauthorized;
   try {
     const body = await request.json() as { projectId?: string; sceneId?: string; targetSceneId?: string; versionId?: string; deliveryTracking?: unknown; action?: 'move-up' | 'move-down' | 'move-before' | 'restore-version' };
     const sceneId = body.sceneId?.trim() ?? '';
