@@ -113,6 +113,7 @@ export async function POST(request: Request) {
       analysis?: AnalysisResult;
       storyboard?: StoryboardResult;
       deliveryTracking?: unknown;
+      batchKey?: string;
     };
     const script = body.script?.trim() ?? '';
     if (!script || script.length > 12000 || !isValidAnalysis(body.analysis) || !isValidStoryboard(body.storyboard)) {
@@ -127,6 +128,10 @@ export async function POST(request: Request) {
       return Response.json({ error: '场次仍存在未解决的硬性连续性问题，不能保存。' }, { status: 409 });
     }
     const projectId = body.projectId?.trim() || DEFAULT_PROJECT_ID;
+    const batchKey = body.batchKey?.trim();
+    if (batchKey && !/^[0-9a-f-]{36}:\d{1,2}$/i.test(batchKey)) {
+      return Response.json({ error: '批量保存标识无效。' }, { status: 400 });
+    }
     const previousScene = body.sceneId?.trim()
       ? await getPreviousScene(body.sceneId.trim(), projectId)
       : await getLatestScene(projectId);
@@ -141,6 +146,7 @@ export async function POST(request: Request) {
       analysis: body.analysis,
       storyboard: validatedStoryboard,
       deliveryTracking: body.deliveryTracking,
+      batchKey,
       snapshot,
     });
     const episodeSceneNumber = await getEpisodeSceneNumber(saved.id, projectId);

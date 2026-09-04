@@ -21,6 +21,7 @@ import {
 import { buildEpisodeReview, type EpisodeReviewStatus } from '@/lib/episode-review';
 import { passesEpisodeAIReviewGate, type EpisodeAIReview } from '@/lib/episode-ai-review';
 import { splitScriptIntoScenes, type ImportedSceneDraft } from '@/lib/batch-import';
+import type { BatchCompileItem, BatchCompilePhase, BatchCompileRun } from '@/lib/batch-run';
 import { buildAdaptationCompileContext, type AdaptationCompileContext, type NovelAdaptationResult } from '@/lib/novel-adaptation';
 import { assessScriptInput } from '@/lib/script-input';
 import { EVAL_CASES, evaluateCase, summarizeEvaluation, type EvaluationSummary } from '@/lib/eval-suite';
@@ -138,14 +139,6 @@ async function extractVideoFrames(file: File) {
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
 type EpisodeSummaryDraft = Pick<EpisodeSummary, 'title' | 'objective' | 'conflict' | 'notes'>;
-type BatchCompilePhase = 'pending' | 'analyzing' | 'repairing_script' | 'storyboarding' | 'repairing_storyboard' | 'saving' | 'complete' | 'failed';
-type BatchCompileItem = {
-  phase: BatchCompilePhase;
-  detail: string;
-  error?: string;
-  sceneId?: string;
-};
-
 const emptyEpisodeSummaryDraft: EpisodeSummaryDraft = { title: '', objective: '', conflict: '', notes: '' };
 const pipelinePhaseLabels: Record<PipelinePhase, string> = {
   idle: '未运行', analyzing: '分析剧本', repairing_script: '修复剧本结构',
@@ -226,6 +219,7 @@ export default function Home() {
   const [isBatchAdapting, setIsBatchAdapting] = useState(false);
   const [isBatchCompiling, setIsBatchCompiling] = useState(false);
   const [batchCompileItems, setBatchCompileItems] = useState<BatchCompileItem[]>([]);
+  const [batchRunId, setBatchRunId] = useState<string | null>(null);
   const [sceneVersions, setSceneVersions] = useState<Record<string, SceneVersionSummary[]>>({});
   const [versionHistorySceneId, setVersionHistorySceneId] = useState<string | null>(null);
   const [isVersionHistoryLoading, setIsVersionHistoryLoading] = useState(false);
@@ -297,6 +291,23 @@ export default function Home() {
     void loadEpisodeSummaries();
     void loadEpisodeAIReviews();
     void loadProject();
+    void loadBatchRun();
+  }
+
+  async function loadBatchRun() {
+    try {
+      const response = await fetch(`/api/batch-runs?projectId=${encodeURIComponent(project?.id || DEFAULT_PROJECT_ID)}`);
+      const payload = await readApiJson<{ run?: BatchCompileRun | null }>(response, '批量任务返回格式异常。');
+      if (!response.ok || !payload.run) return;
+      setBatchRunId(payload.run.id);
+      setBatchDrafts(payload.run.drafts);
+      setBatchCompileItems(payload.run.items);
+      setBatchAdaptation(payload.run.adaptation);
+      setBatchImportText(payload.run.drafts.map((draft) => draft.script).join('\n\n'));
+      setNotice(`已恢复未完成的整集任务：${payload.run.nextIndex}/${payload.run.drafts.length} 场已保存，可从断点继续。`);
+    } catch {
+      // Batch recovery is additive; the rest of the workspace remains usable.
+    }
   }
 
   async function login(event: SyntheticEvent<HTMLFormElement>) {
@@ -398,6 +409,7 @@ export default function Home() {
 
   function splitBatchImport() {
     const drafts = splitScriptIntoScenes(batchImportText, episodeNumber);
+    void cancelCurrentBatchRun();
     setBatchAdaptation(null);
     setAdaptationCompileContext(null);
     setBatchDrafts(drafts);
@@ -419,12 +431,14 @@ export default function Home() {
       const payload = await readApiJson<{ result?: NovelAdaptationResult; error?: string }>(response, 'AI精简改编返回格式异常，请稍后再试。');
       if (!response.ok || !payload.result) throw new Error(payload.error || 'AI精简改编失败');
       setBatchAdaptation(payload.result);
+      await cancelCurrentBatchRun();
       setAdaptationCompileContext(null);
       setBatchDrafts(payload.result.scenes);
       setBatchCompileItems(payload.result.scenes.map(() => ({ phase: 'pending', detail: '等待整集队列' })));
       setNotice(`AI精简改编完成：保留主线与高潮，压缩为 ${payload.result.scenes.length} 个完整场景，预计约 ${Math.ceil(payload.result.estimatedTotalDurationSec / 60)} 分钟。请逐场确认后载入编译。`);
     } catch (error) {
       const fallback = splitScriptIntoScenes(batchImportText, episodeNumber);
+      await cancelCurrentBatchRun();
       setBatchAdaptation(null);
       setAdaptationCompileContext(null);
       setBatchDrafts(fallback);
@@ -485,6 +499,30 @@ export default function Home() {
     });
   }
 
+  async function cancelCurrentBatchRun() {
+    if (!batchRunId) return;
+    const id = batchRunId;
+    setBatchRunId(null);
+    await fetch('/api/batch-runs', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, projectId: project?.id || DEFAULT_PROJECT_ID, action: 'cancel' }),
+    }).catch(() => null);
+  }
+
+  async function checkpointBatchRun(runId: string, index: number, item: BatchCompileItem) {
+    updateBatchCompileItem(index, item);
+    const response = await fetch('/api/batch-runs', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: runId, projectId: project?.id || DEFAULT_PROJECT_ID, index, item }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const payload = await readApiJson<{ run?: BatchCompileRun; error?: string }>(response, '批量任务进度保存返回格式异常。');
+    if (!response.ok || !payload.run) throw new Error(payload.error || '批量任务进度保存失败');
+    setBatchCompileItems(payload.run.items);
+  }
+
   async function requestBatchStoryboard(draft: ImportedSceneDraft, analysis: AnalysisResult, mode: 'generate' | 'repair' = 'generate', current?: StoryboardResult, loopCount = 0) {
     const response = await fetch('/api/storyboard', {
       method: 'POST',
@@ -513,12 +551,26 @@ export default function Home() {
     setNotice(`开始整集批量编译，共 ${batchDrafts.length} 场；将严格按顺序处理并保存为待人工复核草稿。`);
     let completedThisRun = 0;
     try {
+      let activeRunId = batchRunId;
+      if (!activeRunId) {
+        const runResponse = await fetch('/api/batch-runs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, drafts: batchDrafts, adaptation: batchAdaptation }),
+          signal: AbortSignal.timeout(15000),
+        });
+        const runPayload = await readApiJson<{ run?: BatchCompileRun; error?: string }>(runResponse, '批量任务创建返回格式异常。');
+        if (!runResponse.ok || !runPayload.run) throw new Error(runPayload.error || '无法创建可恢复的批量任务');
+        activeRunId = runPayload.run.id;
+        setBatchRunId(activeRunId);
+        setBatchCompileItems(runPayload.run.items);
+      }
       for (let index = firstIncompleteIndex; index < batchDrafts.length; index += 1) {
         if (batchCompileItems[index]?.phase === 'complete') continue;
         const draft = batchDrafts[index];
         const compileContext = buildAdaptationCompileContext(batchAdaptation, draft);
         try {
-          updateBatchCompileItem(index, { phase: 'analyzing', detail: `第 ${index + 1}/${batchDrafts.length} 场：建立交互节拍`, error: undefined });
+          await checkpointBatchRun(activeRunId, index, { phase: 'analyzing', detail: `第 ${index + 1}/${batchDrafts.length} 场：建立交互节拍` });
           setNotice(`正在编译第 ${index + 1}/${batchDrafts.length} 场“${draft.title}”：分析交互节拍…`);
           let analysis = await requestAI(
             { script: draft.script, mode: 'analyze' },
@@ -527,7 +579,7 @@ export default function Home() {
           let analysisRepairCount = 0;
           while (analysis.issues.some((issue) => !issue.resolved) && analysisRepairCount < PIPELINE_LOOP_LIMIT) {
             analysisRepairCount += 1;
-            updateBatchCompileItem(index, { phase: 'repairing_script', detail: `剧本修复 ${analysisRepairCount}/${PIPELINE_LOOP_LIMIT}` });
+            await checkpointBatchRun(activeRunId, index, { phase: 'repairing_script', detail: `剧本修复 ${analysisRepairCount}/${PIPELINE_LOOP_LIMIT}` });
             try {
               analysis = await requestAI(
                 { script: draft.script, mode: 'repair', current: analysis, loopCount: analysisRepairCount },
@@ -541,12 +593,12 @@ export default function Home() {
             throw new Error('剧本仍有未解决的硬问题，已停止后续场次，避免错误状态继续传递。');
           }
 
-          updateBatchCompileItem(index, { phase: 'storyboarding', detail: '生成可执行分镜' });
+          await checkpointBatchRun(activeRunId, index, { phase: 'storyboarding', detail: '生成可执行分镜' });
           let nextStoryboard = await requestBatchStoryboard(draft, analysis);
           let storyboardRepairCount = 0;
           while (nextStoryboard.issues.some((issue) => !issue.resolved) && storyboardRepairCount < PIPELINE_LOOP_LIMIT) {
             storyboardRepairCount += 1;
-            updateBatchCompileItem(index, { phase: 'repairing_storyboard', detail: `连续性修复 ${storyboardRepairCount}/${PIPELINE_LOOP_LIMIT}` });
+            await checkpointBatchRun(activeRunId, index, { phase: 'repairing_storyboard', detail: `连续性修复 ${storyboardRepairCount}/${PIPELINE_LOOP_LIMIT}` });
             try {
               nextStoryboard = await requestBatchStoryboard(draft, analysis, 'repair', nextStoryboard, storyboardRepairCount);
             } catch {
@@ -557,7 +609,7 @@ export default function Home() {
             throw new Error('分镜仍有未解决的硬性连续性问题，已停止后续场次。');
           }
 
-          updateBatchCompileItem(index, { phase: 'saving', detail: '写入跨场景状态库' });
+          await checkpointBatchRun(activeRunId, index, { phase: 'saving', detail: '写入跨场景状态库' });
           const saveResponse = await fetch('/api/scenes', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -569,13 +621,14 @@ export default function Home() {
               analysis,
               storyboard: nextStoryboard,
               deliveryTracking: { statuses: {} },
+              batchKey: `${activeRunId}:${index}`,
             }),
             signal: AbortSignal.timeout(15000),
           });
           const savePayload = await readApiJson<{ saved?: { id: string }; error?: string }>(saveResponse, '场次保存返回格式异常，请稍后再试。');
           if (!saveResponse.ok || !savePayload.saved) throw new Error(savePayload.error || '场次状态保存失败');
 
-          updateBatchCompileItem(index, { phase: 'complete', detail: '已保存，等待人工逐镜确认', sceneId: savePayload.saved.id, error: undefined });
+          await checkpointBatchRun(activeRunId, index, { phase: 'complete', detail: '已保存，等待人工逐镜确认', sceneId: savePayload.saved.id });
           completedThisRun += 1;
           setEpisodeNumber(draft.episodeNumber);
           setSceneTitle(draft.title);
@@ -590,12 +643,16 @@ export default function Home() {
           window.localStorage.setItem('scene-flow-script', draft.script);
         } catch (error) {
           const message = error instanceof Error ? error.message : '批量编译失败';
-          updateBatchCompileItem(index, { phase: 'failed', detail: `停在第 ${index + 1} 场`, error: message });
+          const failedItem: BatchCompileItem = { phase: 'failed', detail: `停在第 ${index + 1} 场`, error: message };
+          updateBatchCompileItem(index, failedItem);
+          await checkpointBatchRun(activeRunId, index, failedItem).catch(() => null);
           setNotice(`整集编译停在第 ${index + 1} 场“${draft.title}”：${message} 修正后可从本场继续。`);
           return;
         }
       }
       setNotice(`整集批量编译完成：本轮完成 ${completedThisRun} 场，全部已保存为待人工逐镜确认的场次草稿。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '无法启动整集批量任务，请稍后重试。');
     } finally {
       await Promise.all([loadScenes(), loadProject()]);
       setIsBatchCompiling(false);
@@ -826,6 +883,8 @@ export default function Home() {
       }
     })();
     return () => { cancelled = true; };
+  // Authentication is checked once on mount; workspace loaders intentionally use the initial project scope.
+  // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
@@ -2331,6 +2390,7 @@ export default function Home() {
                       aria-label="整集剧本批量导入"
                       value={batchImportText}
                       onChange={(event) => {
+                        void cancelCurrentBatchRun();
                         setBatchImportText(event.target.value);
                         setBatchAdaptation(null);
                         setBatchDrafts([]);
@@ -2355,15 +2415,15 @@ export default function Home() {
                         <div className="rounded-lg border border-orange-200 bg-white/85 p-3">
                           <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
                             <div>
-                              <p className="text-xs font-semibold text-orange-950">整集顺序编译 · {batchCompletedCount}/{batchDrafts.length} 场完成</p>
-                              <p className="mt-1 text-[11px] leading-5 text-muted-foreground">依次完成交互分析、受控修复、分镜、连续性检查和状态保存；后一场只继承前一场成功保存的状态。</p>
+                              <p className="text-xs font-semibold text-orange-950">整集顺序编译 · {batchCompletedCount}/{batchDrafts.length} 场完成 {batchRunId && <Badge variant="outline" className="ml-1 border-emerald-200 bg-emerald-50 text-emerald-800">任务已持久保存</Badge>}</p>
+                              <p className="mt-1 text-[11px] leading-5 text-muted-foreground">依次完成交互分析、受控修复、分镜、连续性检查和状态保存；刷新或重新登录后可从未完成场次继续，重试不会重复建场。</p>
                             </div>
                             <div className="flex shrink-0 flex-wrap gap-2">
                               <Button size="sm" onClick={() => void compileBatchScenes()} disabled={busy || batchCompletedCount === batchDrafts.length}>
                                 {isBatchCompiling ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
                                 {isBatchCompiling ? '整集编译中…' : batchFailedIndex >= 0 ? `从第 ${batchFailedIndex + 1} 场继续` : batchCompletedCount > 0 ? '继续整集编译' : '编译整集'}
                               </Button>
-                              <Button size="sm" variant="ghost" onClick={() => { setBatchDrafts([]); setBatchAdaptation(null); setAdaptationCompileContext(null); setBatchCompileItems([]); }} disabled={busy}>清空草稿</Button>
+                              <Button size="sm" variant="ghost" onClick={() => { void cancelCurrentBatchRun(); setBatchDrafts([]); setBatchAdaptation(null); setAdaptationCompileContext(null); setBatchCompileItems([]); }} disabled={busy}>清空草稿</Button>
                             </div>
                           </div>
                           <Progress value={batchDrafts.length > 0 ? (batchCompletedCount / batchDrafts.length) * 100 : 0} className="mt-3 h-1.5" />

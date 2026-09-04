@@ -39,11 +39,31 @@ export const createSceneStatesTableSql = `CREATE TABLE IF NOT EXISTS scene_state
   storyboard_json TEXT NOT NULL,
   snapshot_json TEXT NOT NULL,
   delivery_tracking_json TEXT NOT NULL DEFAULT '{}',
+  batch_key TEXT,
   created_at TEXT NOT NULL
 )`;
 
 export const createSceneOrderIndexSql = `CREATE INDEX IF NOT EXISTS idx_scene_states_project_order
   ON scene_states(project_id, scene_order, scene_number)`;
+
+export const createSceneBatchKeyIndexSql = `CREATE UNIQUE INDEX IF NOT EXISTS idx_scene_states_project_batch_key
+  ON scene_states(project_id, batch_key) WHERE batch_key IS NOT NULL`;
+
+export const createBatchCompileRunsTableSql = `CREATE TABLE IF NOT EXISTS batch_compile_runs (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL DEFAULT 'default',
+  status TEXT NOT NULL DEFAULT 'active',
+  drafts_json TEXT NOT NULL,
+  items_json TEXT NOT NULL,
+  adaptation_json TEXT,
+  next_index INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`;
+
+export const createBatchCompileRunsIndexSql = `CREATE INDEX IF NOT EXISTS idx_batch_compile_runs_project_status
+  ON batch_compile_runs(project_id, status, updated_at DESC)`;
 
 export const createSceneVersionsTableSql = `CREATE TABLE IF NOT EXISTS scene_versions (
   id TEXT PRIMARY KEY,

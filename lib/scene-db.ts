@@ -1,7 +1,10 @@
 import { env } from 'cloudflare:workers';
 
-import { createEpisodeAiReviewsTableSql, createEpisodeSummariesTableSql, createProjectsTableSql, createSceneOrderIndexSql, createSceneStatesTableSql, createSceneVersionsIndexSql, createSceneVersionsTableSql, createSceneVisualReviewsIndexSql, createSceneVisualReviewsTableSql } from '@/db/schema';
+import { createBatchCompileRunsIndexSql, createBatchCompileRunsTableSql, createEpisodeAiReviewsTableSql, createEpisodeSummariesTableSql, createProjectsTableSql, createSceneBatchKeyIndexSql, createSceneOrderIndexSql, createSceneStatesTableSql, createSceneVersionsIndexSql, createSceneVersionsTableSql, createSceneVisualReviewsIndexSql, createSceneVisualReviewsTableSql } from '@/db/schema';
+import { pendingBatchItem, type BatchCompileItem, type BatchCompileRun, type BatchCompileStatus } from '@/lib/batch-run';
+import type { ImportedSceneDraft } from '@/lib/batch-import';
 import type { EpisodeAIReview } from '@/lib/episode-ai-review';
+import type { NovelAdaptationResult } from '@/lib/novel-adaptation';
 import { buildSceneProductionSummary, DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import type {
   DeliveryShotStatus, DeliveryTrackingState, EpisodeSummary, SceneProject,
@@ -22,7 +25,21 @@ interface SceneRow {
   storyboard_json?: string;
   snapshot_json: string;
   delivery_tracking_json?: string | null;
+  batch_key?: string | null;
   created_at: string;
+}
+
+interface BatchCompileRunRow {
+  id: string;
+  project_id: string;
+  status: BatchCompileStatus;
+  drafts_json: string;
+  items_json: string;
+  adaptation_json?: string | null;
+  next_index: number;
+  last_error?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface ProjectRow {
@@ -131,6 +148,9 @@ async function ensureSchema() {
       await db.prepare('UPDATE scene_states SET scene_order = scene_number WHERE scene_order = 0').run();
     }
     await db.prepare(createSceneOrderIndexSql).run();
+    await db.prepare(createSceneBatchKeyIndexSql).run();
+    await db.prepare(createBatchCompileRunsTableSql).run();
+    await db.prepare(createBatchCompileRunsIndexSql).run();
     // Create dependent tables only after legacy scene_states databases have all
     // columns used by the baseline backfill below.
     await db.prepare(createSceneVersionsTableSql).run();
@@ -152,6 +172,81 @@ async function ensureSchema() {
     ).bind(DEFAULT_PROJECT_ID, '未命名短剧项目', new Date().toISOString(), new Date().toISOString()).run();
   })();
   return schemaPromise;
+}
+
+function toBatchCompileRun(row: BatchCompileRunRow): BatchCompileRun {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    status: row.status,
+    drafts: JSON.parse(row.drafts_json) as ImportedSceneDraft[],
+    items: JSON.parse(row.items_json) as BatchCompileItem[],
+    adaptation: row.adaptation_json ? JSON.parse(row.adaptation_json) as NovelAdaptationResult : null,
+    nextIndex: Math.max(0, Number(row.next_index) || 0),
+    lastError: row.last_error ?? undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+export async function getResumableBatchCompileRun(projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const row = await database().prepare(
+    `SELECT id, project_id, status, drafts_json, items_json, adaptation_json, next_index, last_error, created_at, updated_at
+     FROM batch_compile_runs WHERE project_id = ? AND status IN ('active', 'failed')
+     ORDER BY updated_at DESC LIMIT 1`,
+  ).bind(projectId).first<BatchCompileRunRow>();
+  return row ? toBatchCompileRun(row) : null;
+}
+
+export async function createBatchCompileRun(input: { projectId?: string; drafts: ImportedSceneDraft[]; adaptation?: NovelAdaptationResult | null }) {
+  await ensureSchema();
+  const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
+  if (!await getProject(projectId)) throw new Error('项目不存在');
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+  const items = input.drafts.map(pendingBatchItem);
+  await database().batch([
+    database().prepare("UPDATE batch_compile_runs SET status = 'cancelled', updated_at = ? WHERE project_id = ? AND status IN ('active', 'failed')").bind(now, projectId),
+    database().prepare(
+      `INSERT INTO batch_compile_runs (id, project_id, status, drafts_json, items_json, adaptation_json, next_index, created_at, updated_at)
+       VALUES (?, ?, 'active', ?, ?, ?, 0, ?, ?)`,
+    ).bind(id, projectId, JSON.stringify(input.drafts), JSON.stringify(items), input.adaptation ? JSON.stringify(input.adaptation) : null, now, now),
+  ]);
+  return (await getBatchCompileRun(id, projectId))!;
+}
+
+export async function getBatchCompileRun(id: string, projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  const row = await database().prepare(
+    `SELECT id, project_id, status, drafts_json, items_json, adaptation_json, next_index, last_error, created_at, updated_at
+     FROM batch_compile_runs WHERE id = ? AND project_id = ?`,
+  ).bind(id, projectId).first<BatchCompileRunRow>();
+  return row ? toBatchCompileRun(row) : null;
+}
+
+export async function checkpointBatchCompileRun(input: { id: string; projectId?: string; index: number; item: BatchCompileItem }) {
+  const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
+  const run = await getBatchCompileRun(input.id, projectId);
+  if (!run || run.status === 'cancelled' || run.status === 'completed') throw new Error('批量任务不存在或已结束');
+  if (input.index < 0 || input.index >= run.drafts.length) throw new Error('批量任务场次索引无效');
+  const items = run.drafts.map((_, index) => run.items[index] ?? pendingBatchItem());
+  items[input.index] = input.item;
+  const completed = items.every((item) => item.phase === 'complete');
+  const status: BatchCompileStatus = completed ? 'completed' : input.item.phase === 'failed' ? 'failed' : 'active';
+  const nextIndex = completed ? items.length : Math.max(0, items.findIndex((item) => item.phase !== 'complete'));
+  const now = new Date().toISOString();
+  await database().prepare(
+    'UPDATE batch_compile_runs SET status = ?, items_json = ?, next_index = ?, last_error = ?, updated_at = ? WHERE id = ? AND project_id = ?',
+  ).bind(status, JSON.stringify(items), nextIndex, input.item.error ?? null, now, input.id, projectId).run();
+  return (await getBatchCompileRun(input.id, projectId))!;
+}
+
+export async function cancelBatchCompileRun(id: string, projectId = DEFAULT_PROJECT_ID) {
+  await ensureSchema();
+  await database().prepare(
+    "UPDATE batch_compile_runs SET status = 'cancelled', updated_at = ? WHERE id = ? AND project_id = ? AND status IN ('active', 'failed')",
+  ).bind(new Date().toISOString(), id, projectId).run();
 }
 
 function toSceneProject(row: ProjectRow): SceneProject {
@@ -497,12 +592,19 @@ export async function saveScene(input: {
   storyboard: StoryboardResult;
   snapshot: SceneSnapshot;
   deliveryTracking?: unknown;
+  batchKey?: string;
 }) {
   await ensureSchema();
   const projectId = input.projectId?.trim() || DEFAULT_PROJECT_ID;
   const episodeNumber = Math.max(1, Math.min(999, Math.round(Number(input.episodeNumber) || 1)));
   const project = await getProject(projectId);
   if (!project) throw new Error('项目不存在');
+  if (input.batchKey) {
+    const idempotent = await database().prepare(
+      'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE project_id = ? AND batch_key = ?',
+    ).bind(projectId, input.batchKey).first<{ id: string; scene_number: number; episode_number: number; scene_order: number }>();
+    if (idempotent) return { id: idempotent.id, sceneNumber: idempotent.scene_number, episodeNumber: idempotent.episode_number, sceneOrder: idempotent.scene_order, updated: false, idempotent: true };
+  }
   const existing = input.sceneId
     ? await database().prepare(
         'SELECT id, scene_number, episode_number, scene_order FROM scene_states WHERE id = ? AND project_id = ?',
@@ -547,12 +649,12 @@ export async function saveScene(input: {
   const id = crypto.randomUUID();
   await database().prepare(
     `INSERT INTO scene_states
-     (id, project_id, scene_number, episode_number, scene_order, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     (id, project_id, scene_number, episode_number, scene_order, title, source_hash, script, analysis_json, storyboard_json, snapshot_json, delivery_tracking_json, batch_key, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     id, projectId, sceneNumber, episodeNumber, sceneOrder, input.title, `${input.sourceHash}:${id}`, input.script,
     JSON.stringify(input.analysis), JSON.stringify(input.storyboard),
-    JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), createdAt,
+    JSON.stringify(input.snapshot), JSON.stringify(deliveryTracking), input.batchKey ?? null, createdAt,
   ).run();
   await recordSceneVersion({
     sceneId: id, projectId, episodeNumber, title: input.title, sourceHash: `${input.sourceHash}:${id}`,
