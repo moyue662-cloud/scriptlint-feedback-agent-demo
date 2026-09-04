@@ -138,6 +138,13 @@ async function extractVideoFrames(file: File) {
 type PipelinePhase = 'idle' | 'analyzing' | 'repairing_script' | 'generating_storyboard' | 'repairing_storyboard' | 'complete' | 'blocked' | 'error';
 type AuthState = 'checking' | 'anonymous' | 'authenticated';
 type EpisodeSummaryDraft = Pick<EpisodeSummary, 'title' | 'objective' | 'conflict' | 'notes'>;
+type BatchCompilePhase = 'pending' | 'analyzing' | 'repairing_script' | 'storyboarding' | 'repairing_storyboard' | 'saving' | 'complete' | 'failed';
+type BatchCompileItem = {
+  phase: BatchCompilePhase;
+  detail: string;
+  error?: string;
+  sceneId?: string;
+};
 
 const emptyEpisodeSummaryDraft: EpisodeSummaryDraft = { title: '', objective: '', conflict: '', notes: '' };
 const pipelinePhaseLabels: Record<PipelinePhase, string> = {
@@ -148,6 +155,11 @@ const pipelinePhaseLabels: Record<PipelinePhase, string> = {
 const pipelinePhaseProgress: Record<PipelinePhase, number> = {
   idle: 0, analyzing: 12, repairing_script: 34, generating_storyboard: 58,
   repairing_storyboard: 78, complete: 100, blocked: 100, error: 100,
+};
+const batchCompilePhaseLabels: Record<BatchCompilePhase, string> = {
+  pending: '待编译', analyzing: '分析交互', repairing_script: '修复剧本',
+  storyboarding: '生成分镜', repairing_storyboard: '修复连续性', saving: '保存草稿',
+  complete: '已完成', failed: '需要处理',
 };
 
 const pipeline = [
@@ -212,6 +224,8 @@ export default function Home() {
   const [batchAdaptation, setBatchAdaptation] = useState<NovelAdaptationResult | null>(null);
   const [adaptationCompileContext, setAdaptationCompileContext] = useState<AdaptationCompileContext | null>(null);
   const [isBatchAdapting, setIsBatchAdapting] = useState(false);
+  const [isBatchCompiling, setIsBatchCompiling] = useState(false);
+  const [batchCompileItems, setBatchCompileItems] = useState<BatchCompileItem[]>([]);
   const [sceneVersions, setSceneVersions] = useState<Record<string, SceneVersionSummary[]>>({});
   const [versionHistorySceneId, setVersionHistorySceneId] = useState<string | null>(null);
   const [isVersionHistoryLoading, setIsVersionHistoryLoading] = useState(false);
@@ -382,6 +396,7 @@ export default function Home() {
     setBatchAdaptation(null);
     setAdaptationCompileContext(null);
     setBatchDrafts(drafts);
+    setBatchCompileItems(drafts.map(() => ({ phase: 'pending', detail: '等待整集队列' })));
     setNotice(drafts.length > 0 ? `已按完整事件合并为 ${drafts.length} 个场次草稿；此模式保留原文，不主动删减剧情。` : '没有识别到可导入的场次内容。');
   }
 
@@ -401,12 +416,14 @@ export default function Home() {
       setBatchAdaptation(payload.result);
       setAdaptationCompileContext(null);
       setBatchDrafts(payload.result.scenes);
+      setBatchCompileItems(payload.result.scenes.map(() => ({ phase: 'pending', detail: '等待整集队列' })));
       setNotice(`AI精简改编完成：保留主线与高潮，压缩为 ${payload.result.scenes.length} 个完整场景，预计约 ${Math.ceil(payload.result.estimatedTotalDurationSec / 60)} 分钟。请逐场确认后载入编译。`);
     } catch (error) {
       const fallback = splitScriptIntoScenes(batchImportText, episodeNumber);
       setBatchAdaptation(null);
       setAdaptationCompileContext(null);
       setBatchDrafts(fallback);
+      setBatchCompileItems(fallback.map(() => ({ phase: 'pending', detail: '等待整集队列' })));
       setNotice(`${error instanceof Error ? error.message : 'AI精简改编暂时不可用'}，已改用“仅合并原文”结果，未自动删除剧情。`);
     } finally {
       setIsBatchAdapting(false);
@@ -452,6 +469,131 @@ export default function Home() {
       setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}；精简场景已自动载入，并显示本地规则结果，无需手动复制。`);
     } finally {
       setIsRunning(false);
+    }
+  }
+
+  function updateBatchCompileItem(index: number, update: Partial<BatchCompileItem>) {
+    setBatchCompileItems((current) => {
+      const next = batchDrafts.map((_, itemIndex) => current[itemIndex] ?? { phase: 'pending' as const, detail: '等待整集队列' });
+      next[index] = { ...next[index], ...update };
+      return next;
+    });
+  }
+
+  async function requestBatchStoryboard(draft: ImportedSceneDraft, analysis: AnalysisResult, mode: 'generate' | 'repair' = 'generate', current?: StoryboardResult, loopCount = 0) {
+    const response = await fetch('/api/storyboard', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        script: draft.script,
+        analysis,
+        projectId: project?.id || DEFAULT_PROJECT_ID,
+        ...(mode === 'repair' && current ? { mode: 'repair', current, loopCount } : {}),
+      }),
+      signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS + 5000),
+    });
+    const payload = await readApiJson<{ result?: StoryboardResult; error?: string }>(response, '分镜服务返回格式异常，请稍后再试。');
+    if (!response.ok || !payload.result) throw new Error(payload.error || '分镜生成失败');
+    return payload.result;
+  }
+
+  async function compileBatchScenes() {
+    if (busy || batchDrafts.length === 0) return;
+    const firstIncompleteIndex = batchDrafts.findIndex((_, index) => batchCompileItems[index]?.phase !== 'complete');
+    if (firstIncompleteIndex < 0) {
+      setNotice('本批场次已经全部编译完成。如需重新生成，请先修改或重新拆分原文。');
+      return;
+    }
+    setIsBatchCompiling(true);
+    setNotice(`开始整集批量编译，共 ${batchDrafts.length} 场；将严格按顺序处理并保存为待人工复核草稿。`);
+    let completedThisRun = 0;
+    try {
+      for (let index = firstIncompleteIndex; index < batchDrafts.length; index += 1) {
+        if (batchCompileItems[index]?.phase === 'complete') continue;
+        const draft = batchDrafts[index];
+        const compileContext = buildAdaptationCompileContext(batchAdaptation, draft);
+        try {
+          updateBatchCompileItem(index, { phase: 'analyzing', detail: `第 ${index + 1}/${batchDrafts.length} 场：建立交互节拍`, error: undefined });
+          setNotice(`正在编译第 ${index + 1}/${batchDrafts.length} 场“${draft.title}”：分析交互节拍…`);
+          let analysis = await requestAI(
+            { script: draft.script, mode: 'analyze' },
+            { episodeNumber: draft.episodeNumber, adaptationContext: compileContext, sceneId: null },
+          );
+          let analysisRepairCount = 0;
+          while (analysis.issues.some((issue) => !issue.resolved) && analysisRepairCount < PIPELINE_LOOP_LIMIT) {
+            analysisRepairCount += 1;
+            updateBatchCompileItem(index, { phase: 'repairing_script', detail: `剧本修复 ${analysisRepairCount}/${PIPELINE_LOOP_LIMIT}` });
+            try {
+              analysis = await requestAI(
+                { script: draft.script, mode: 'repair', current: analysis, loopCount: analysisRepairCount },
+                { episodeNumber: draft.episodeNumber, adaptationContext: compileContext, sceneId: null },
+              );
+            } catch {
+              break;
+            }
+          }
+          if (analysis.issues.some((issue) => !issue.resolved && issue.severity === 'hard')) {
+            throw new Error('剧本仍有未解决的硬问题，已停止后续场次，避免错误状态继续传递。');
+          }
+
+          updateBatchCompileItem(index, { phase: 'storyboarding', detail: '生成可执行分镜' });
+          let nextStoryboard = await requestBatchStoryboard(draft, analysis);
+          let storyboardRepairCount = 0;
+          while (nextStoryboard.issues.some((issue) => !issue.resolved) && storyboardRepairCount < PIPELINE_LOOP_LIMIT) {
+            storyboardRepairCount += 1;
+            updateBatchCompileItem(index, { phase: 'repairing_storyboard', detail: `连续性修复 ${storyboardRepairCount}/${PIPELINE_LOOP_LIMIT}` });
+            try {
+              nextStoryboard = await requestBatchStoryboard(draft, analysis, 'repair', nextStoryboard, storyboardRepairCount);
+            } catch {
+              break;
+            }
+          }
+          if (nextStoryboard.issues.some((issue) => !issue.resolved && issue.severity === 'hard')) {
+            throw new Error('分镜仍有未解决的硬性连续性问题，已停止后续场次。');
+          }
+
+          updateBatchCompileItem(index, { phase: 'saving', detail: '写入跨场景状态库' });
+          const saveResponse = await fetch('/api/scenes', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              projectId: project?.id || DEFAULT_PROJECT_ID,
+              episodeNumber: draft.episodeNumber,
+              title: draft.title,
+              script: draft.script,
+              analysis,
+              storyboard: nextStoryboard,
+              deliveryTracking: { statuses: {} },
+            }),
+            signal: AbortSignal.timeout(15000),
+          });
+          const savePayload = await readApiJson<{ saved?: { id: string }; error?: string }>(saveResponse, '场次保存返回格式异常，请稍后再试。');
+          if (!saveResponse.ok || !savePayload.saved) throw new Error(savePayload.error || '场次状态保存失败');
+
+          updateBatchCompileItem(index, { phase: 'complete', detail: '已保存，等待人工逐镜确认', sceneId: savePayload.saved.id, error: undefined });
+          completedThisRun += 1;
+          setEpisodeNumber(draft.episodeNumber);
+          setSceneTitle(draft.title);
+          setScript(draft.script);
+          setAdaptationCompileContext(compileContext);
+          setResult(analysis);
+          setSource('ai');
+          setStoryboard(nextStoryboard);
+          setReviewedShotIds([]);
+          setDeliveryShotStatuses({});
+          setLoadedSceneId(savePayload.saved.id);
+          window.localStorage.setItem('scene-flow-script', draft.script);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : '批量编译失败';
+          updateBatchCompileItem(index, { phase: 'failed', detail: `停在第 ${index + 1} 场`, error: message });
+          setNotice(`整集编译停在第 ${index + 1} 场“${draft.title}”：${message} 修正后可从本场继续。`);
+          return;
+        }
+      }
+      setNotice(`整集批量编译完成：本轮完成 ${completedThisRun} 场，全部已保存为待人工逐镜确认的场次草稿。`);
+    } finally {
+      await Promise.all([loadScenes(), loadProject()]);
+      setIsBatchCompiling(false);
     }
   }
 
@@ -654,7 +796,9 @@ export default function Home() {
   const activeIssues = useMemo(() => result.issues.filter((issue) => !issue.resolved), [result]);
   const hardIssues = activeIssues.filter((issue) => issue.severity === 'hard');
   const activeContinuityIssues = storyboard?.issues.filter((issue) => !issue.resolved) ?? [];
-  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating || isBatchAdapting;
+  const busy = isRunning || isStoryboardRunning || isSceneSaving || isSceneLoading || isSceneReordering || isSceneDeleting || isEpisodeSummarySaving || isEpisodeAIReviewing || isPipelineRunning || isProjectSaving || isProjectApprovalSaving || isProjectExporting || isVersionRestoring || isVisualReviewing || isQualityEvaluating || isBatchAdapting || isBatchCompiling;
+  const batchCompletedCount = batchCompileItems.filter((item) => item.phase === 'complete').length;
+  const batchFailedIndex = batchCompileItems.findIndex((item) => item.phase === 'failed');
   const localStructureEstimate = useMemo(() => script.trim() ? analyzeScript(script).beats.length : 0, [script]);
   const sceneDraftEstimate = useMemo(() => script.trim() ? splitScriptIntoScenes(script, episodeNumber) : [], [script, episodeNumber]);
   const scriptInputAssessment = useMemo(() => assessScriptInput(script), [script]);
@@ -2090,6 +2234,7 @@ export default function Home() {
                         setBatchImportText(event.target.value);
                         setBatchAdaptation(null);
                         setBatchDrafts([]);
+                        setBatchCompileItems([]);
                       }}
                       className="mt-3 min-h-28 bg-white"
                       placeholder={'第1场 客厅\n林晓：你什么时候辞职的？\n\n第2场 公司门口\n父亲：这件事我会解释。'}
@@ -2107,10 +2252,25 @@ export default function Home() {
                     )}
                     {batchDrafts.length > 0 && (
                       <div className="mt-3 space-y-2">
-                        <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold text-orange-950">{batchAdaptation ? '已精简改编' : '已合并'} {batchDrafts.length} 个完整场次</p><Button size="sm" variant="ghost" onClick={() => { setBatchDrafts([]); setBatchAdaptation(null); setAdaptationCompileContext(null); }} disabled={busy}>清空草稿</Button></div>
+                        <div className="rounded-lg border border-orange-200 bg-white/85 p-3">
+                          <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
+                            <div>
+                              <p className="text-xs font-semibold text-orange-950">整集顺序编译 · {batchCompletedCount}/{batchDrafts.length} 场完成</p>
+                              <p className="mt-1 text-[11px] leading-5 text-muted-foreground">依次完成交互分析、受控修复、分镜、连续性检查和状态保存；后一场只继承前一场成功保存的状态。</p>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap gap-2">
+                              <Button size="sm" onClick={() => void compileBatchScenes()} disabled={busy || batchCompletedCount === batchDrafts.length}>
+                                {isBatchCompiling ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}
+                                {isBatchCompiling ? '整集编译中…' : batchFailedIndex >= 0 ? `从第 ${batchFailedIndex + 1} 场继续` : batchCompletedCount > 0 ? '继续整集编译' : '编译整集'}
+                              </Button>
+                              <Button size="sm" variant="ghost" onClick={() => { setBatchDrafts([]); setBatchAdaptation(null); setAdaptationCompileContext(null); setBatchCompileItems([]); }} disabled={busy}>清空草稿</Button>
+                            </div>
+                          </div>
+                          <Progress value={batchDrafts.length > 0 ? (batchCompletedCount / batchDrafts.length) * 100 : 0} className="mt-3 h-1.5" />
+                        </div>
                         {batchDrafts.map((draft, index) => (
                           <div key={`${draft.title}-${index}`} className="flex flex-col justify-between gap-2 rounded-lg border border-orange-100 bg-white/80 p-3 sm:flex-row sm:items-center">
-                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p>{draft.splitReason === 'adapted' ? <Badge className="bg-violet-700">AI精简场景</Badge> : draft.splitReason !== 'heading' && <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">待确认场界</Badge>}{draft.narrativeRole && <Badge variant="outline">{draft.narrativeRole}</Badge>}{draft.estimatedDurationSec && <span className="text-[11px] text-muted-foreground">整场约 {draft.estimatedDurationSec} 秒 · 后续拆镜头</span>}{draft.timeMarker && <Badge variant="outline">{draft.timeMarker}</Badge>}</div>{draft.retainedHighlights && draft.retainedHighlights.length > 0 && <p className="mt-1 text-[11px] text-violet-700">保留亮点：{draft.retainedHighlights.join('、')}</p>}{draft.appearingCharacters && draft.appearingCharacters.length > 0 && <p className="mt-1 text-[11px] text-muted-foreground">出场人物：{draft.appearingCharacters.join('、')}</p>}<p className="mt-1 line-clamp-3 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
+                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p>{draft.splitReason === 'adapted' ? <Badge className="bg-violet-700">AI精简场景</Badge> : draft.splitReason !== 'heading' && <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">待确认场界</Badge>}{draft.narrativeRole && <Badge variant="outline">{draft.narrativeRole}</Badge>}{draft.estimatedDurationSec && <span className="text-[11px] text-muted-foreground">整场约 {draft.estimatedDurationSec} 秒 · 后续拆镜头</span>}{draft.timeMarker && <Badge variant="outline">{draft.timeMarker}</Badge>}{batchCompileItems[index] && <Badge variant="outline" className={batchCompileItems[index].phase === 'complete' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : batchCompileItems[index].phase === 'failed' ? 'border-rose-200 bg-rose-50 text-rose-800' : batchCompileItems[index].phase !== 'pending' ? 'border-sky-200 bg-sky-50 text-sky-800' : ''}>{batchCompilePhaseLabels[batchCompileItems[index].phase]}</Badge>}</div>{batchCompileItems[index] && batchCompileItems[index].phase !== 'pending' && <p className={`mt-1 text-[11px] ${batchCompileItems[index].phase === 'failed' ? 'text-rose-700' : batchCompileItems[index].phase === 'complete' ? 'text-emerald-700' : 'text-sky-700'}`}>{batchCompileItems[index].detail}{batchCompileItems[index].error ? `：${batchCompileItems[index].error}` : ''}</p>}{draft.retainedHighlights && draft.retainedHighlights.length > 0 && <p className="mt-1 text-[11px] text-violet-700">保留亮点：{draft.retainedHighlights.join('、')}</p>}{draft.appearingCharacters && draft.appearingCharacters.length > 0 && <p className="mt-1 text-[11px] text-muted-foreground">出场人物：{draft.appearingCharacters.join('、')}</p>}<p className="mt-1 line-clamp-3 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
                             <div className="flex shrink-0 flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={() => loadBatchDraft(draft)} disabled={busy}>载入修改</Button><Button size="sm" onClick={() => void compileBatchDraft(draft)} disabled={busy}>{isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}采用并编译</Button></div>
                           </div>
                         ))}
