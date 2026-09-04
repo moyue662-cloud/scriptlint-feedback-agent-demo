@@ -36,9 +36,11 @@ const { assessScriptInput } = scriptInputModule;
   const scene = (id, title, snapshot, openingState, script = '') => ({
     id, projectId: 'default', sceneNumber: Number(id.slice(1)), episodeNumber: 1,
     sceneOrder: Number(id.slice(1)), title, script, snapshot, openingState,
-    transitionReason: '建立场景', deliveryTracking: { statuses: { s1: 'accepted' }, updatedAt: null },
+    transitionReason: '建立场景', deliveryTracking: {
+      statuses: { s1: 'accepted' }, reviewedShotIds: ['s1'], reviewedAt: '2026-01-01T00:00:00.000Z', updatedAt: null,
+    },
     summary: {
-      shotCount: 1, durationSec: 4, continuityIssueCount: 0, submittedShotCount: 1,
+      shotCount: 1, durationSec: 4, continuityIssueCount: 0, reviewedShotCount: 1, submittedShotCount: 1,
       acceptedShotCount: 1, productionProgress: 100, status: 'completed',
     },
     createdAt: '2026-01-01T00:00:00.000Z',
@@ -57,6 +59,14 @@ const { assessScriptInput } = scriptInputModule;
   const explained = scene('s2', '十分钟后继续对峙', { ...changedOpening, characters: [character] }, changedOpening, '十分钟后，父亲站到门口。');
   const explainedReview = buildEpisodeReview(1, [first, explained], summary);
   assert.ok(!explainedReview.issues.some((issue) => issue.id.startsWith('cross-scene-')));
+  const unreviewed = {
+    ...first,
+    deliveryTracking: { statuses: {}, reviewedShotIds: [], reviewedAt: null, updatedAt: null },
+    summary: { ...first.summary, reviewedShotCount: 0, submittedShotCount: 0, acceptedShotCount: 0, productionProgress: 0, status: 'needs-review' },
+  };
+  const unreviewedResult = buildEpisodeReview(1, [unreviewed], summary);
+  assert.equal(unreviewedResult.status, 'blocked');
+  assert.ok(unreviewedResult.issues.some((issue) => issue.id === 'human-review-incomplete'));
 
   const inheritedSnapshot = {
     ...endState,
@@ -100,7 +110,7 @@ const { assessScriptInput } = scriptInputModule;
   assert.notEqual(originalHash, reorderedHash);
 
   const deliveryOnlyHash = await buildEpisodeSourceHash(1, [
-    { ...detailScenes[0], deliveryTracking: { statuses: { s1: 'submitted' }, updatedAt: 'later' } },
+    { ...detailScenes[0], deliveryTracking: { statuses: { s1: 'submitted' }, reviewedShotIds: ['s1'], reviewedAt: 'later', updatedAt: 'later' } },
     detailScenes[1],
   ], summary);
   assert.equal(originalHash, deliveryOnlyHash);

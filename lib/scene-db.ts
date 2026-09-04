@@ -190,7 +190,12 @@ function toEpisodeAIReview(row: EpisodeAIReviewRow): EpisodeAIReview {
 const deliveryStatuses = new Set<DeliveryShotStatus>(['pending', 'submitted', 'accepted']);
 
 function normalizeDeliveryTracking(value: unknown, shotIds?: Set<string>): DeliveryTrackingState {
-  const raw = value && typeof value === 'object' ? value as { statuses?: unknown; updatedAt?: unknown } : {};
+  const raw = value && typeof value === 'object' ? value as {
+    statuses?: unknown;
+    reviewedShotIds?: unknown;
+    reviewedAt?: unknown;
+    updatedAt?: unknown;
+  } : {};
   const statuses: Record<string, DeliveryShotStatus> = {};
   if (raw.statuses && typeof raw.statuses === 'object') {
     for (const [shotId, status] of Object.entries(raw.statuses)) {
@@ -200,8 +205,14 @@ function normalizeDeliveryTracking(value: unknown, shotIds?: Set<string>): Deliv
       }
     }
   }
+  const reviewedShotIds = Array.isArray(raw.reviewedShotIds)
+    ? raw.reviewedShotIds.filter((shotId): shotId is string => (
+        typeof shotId === 'string' && (!shotIds || shotIds.has(shotId))
+      )).filter((shotId, index, all) => all.indexOf(shotId) === index)
+    : [];
+  const reviewedAt = typeof raw.reviewedAt === 'string' && raw.reviewedAt ? raw.reviewedAt : null;
   const updatedAt = typeof raw.updatedAt === 'string' && raw.updatedAt ? raw.updatedAt : null;
-  return { statuses, updatedAt };
+  return { statuses, reviewedShotIds, reviewedAt, updatedAt };
 }
 
 function toStoredScene(row: SceneRow): StoredScene {

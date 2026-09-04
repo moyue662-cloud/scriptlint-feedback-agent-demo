@@ -26,6 +26,7 @@ export interface EpisodeReviewResult {
   checks: EpisodeReviewCheck[];
   sceneCount: number;
   shotCount: number;
+  reviewedShotCount: number;
   acceptedShotCount: number;
   continuityIssueCount: number;
 }
@@ -74,6 +75,7 @@ export function buildEpisodeReview(
     .sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
   const issues: EpisodeReviewIssue[] = [];
   const shotCount = episodeScenes.reduce((total, scene) => total + scene.summary.shotCount, 0);
+  const reviewedShotCount = episodeScenes.reduce((total, scene) => total + scene.summary.reviewedShotCount, 0);
   const acceptedShotCount = episodeScenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0);
   const continuityIssueCount = episodeScenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0);
   const crossSceneMismatches = episodeScenes.slice(1).flatMap((scene, index) => {
@@ -126,6 +128,13 @@ export function buildEpisodeReview(
       id: 'continuity-open', severity: 'hard', title: `仍有 ${continuityIssueCount} 项连续性问题`,
       detail: '人物、道具、空间或镜头状态尚未完全闭合。',
       suggestion: '逐场修复连续性问题后重新保存场次状态。',
+    });
+  }
+  if (shotCount > reviewedShotCount) {
+    issues.push({
+      id: 'human-review-incomplete', severity: 'hard', title: `${shotCount - reviewedShotCount} 个镜头尚未完成人工审阅`,
+      detail: `本集已人工确认 ${reviewedShotCount}/${shotCount} 个镜头，未确认镜头不能进入最终交付。`,
+      suggestion: '逐场载入分镜，核对动作、台词、状态和视频Prompt后确认镜头。',
     });
   }
   crossSceneMismatches.forEach(({ previous, scene, mismatches }, index) => {
@@ -194,8 +203,8 @@ export function buildEpisodeReview(
       detail: !summary?.conflict.trim() ? '尚未定义主要阻力和升级方向' : unchangedTransitions.length > 0 ? `${unchangedTransitions.length} 处场间状态没有明显变化` : summary.conflict.trim(),
     },
     {
-      id: 'execution', label: '场次可执行', passed: episodeScenes.length > 0 && scenesWithoutShots.length === 0,
-      detail: episodeScenes.length > 0 ? `${episodeScenes.length - scenesWithoutShots.length}/${episodeScenes.length} 场已有分镜` : '尚无场次',
+      id: 'execution', label: '场次可执行', passed: episodeScenes.length > 0 && scenesWithoutShots.length === 0 && reviewedShotCount === shotCount,
+      detail: episodeScenes.length > 0 ? `${episodeScenes.length - scenesWithoutShots.length}/${episodeScenes.length} 场已有分镜，人工确认 ${reviewedShotCount}/${shotCount} 镜` : '尚无场次',
     },
     {
       id: 'continuity', label: '连续性闭合', passed: continuityIssueCount === 0 && incompleteStateScenes.length === 0 && crossSceneMismatches.length === 0 && episodeScenes.length > 0,
@@ -213,6 +222,7 @@ export function buildEpisodeReview(
     checks,
     sceneCount: episodeScenes.length,
     shotCount,
+    reviewedShotCount,
     acceptedShotCount,
     continuityIssueCount,
   };

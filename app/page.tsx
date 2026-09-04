@@ -353,7 +353,7 @@ export default function Home() {
     setLoopCount(0);
     setStoryboard(detail.storyboard);
     setStoryboardLoopCount(0);
-    setReviewedShotIds(detail.storyboard.shots.map((shot) => shot.id));
+    setReviewedShotIds(detail.deliveryTracking.reviewedShotIds);
     setDeliveryShotStatuses(detail.deliveryTracking.statuses);
     setDeliveryCopied(false);
     setSceneTitle(detail.title);
@@ -1230,7 +1230,11 @@ export default function Home() {
           sceneId: loadedSceneId,
           episodeNumber,
           title: sceneTitle, script, analysis: result, storyboard,
-          deliveryTracking: { statuses: deliveryShotStatuses },
+          deliveryTracking: {
+            statuses: deliveryShotStatuses,
+            reviewedShotIds,
+            reviewedAt: allShotsReviewed ? new Date().toISOString() : null,
+          },
         }),
       });
       const payload = await readApiJson<{
@@ -1372,12 +1376,27 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
-  function queueDeliveryTrackingSave(sceneId: string, statuses: Record<string, DeliveryShotStatus>) {
+  function queueDeliveryTrackingSave(
+    sceneId: string,
+    statuses: Record<string, DeliveryShotStatus>,
+    nextReviewedShotIds = reviewedShotIds,
+  ) {
     deliverySaveQueue.current = deliverySaveQueue.current.then(async () => {
+      const currentShotIds = new Set(storyboard?.shots.map((shot) => shot.id) ?? []);
+      const reviewComplete = currentShotIds.size > 0
+        && [...currentShotIds].every((shotId) => nextReviewedShotIds.includes(shotId));
       const response = await fetch('/api/scenes', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectId: project?.id || DEFAULT_PROJECT_ID, sceneId, deliveryTracking: { statuses } }),
+        body: JSON.stringify({
+          projectId: project?.id || DEFAULT_PROJECT_ID,
+          sceneId,
+          deliveryTracking: {
+            statuses,
+            reviewedShotIds: nextReviewedShotIds,
+            reviewedAt: reviewComplete ? new Date().toISOString() : null,
+          },
+        }),
       });
       const payload = await readApiJson<{ tracking?: StoredScene['deliveryTracking']; error?: string }>(response, '制作进度返回格式异常，请稍后重试。');
       if (!response.ok || !payload.tracking) throw new Error(payload.error || '制作进度保存失败');
@@ -1411,14 +1430,20 @@ export default function Home() {
   }
 
   function toggleShotReview(shotId: string) {
-    setReviewedShotIds((current) => current.includes(shotId)
-      ? current.filter((id) => id !== shotId)
-      : [...current, shotId]);
+    const next = reviewedShotIds.includes(shotId)
+      ? reviewedShotIds.filter((id) => id !== shotId)
+      : [...reviewedShotIds, shotId];
+    setReviewedShotIds(next);
+    if (activeSavedScene) queueDeliveryTrackingSave(activeSavedScene.id, deliveryShotStatuses, next);
+    if (!activeSavedScene) setNotice('本页审阅状态已更新；保存场次后即可跨刷新保留。');
   }
 
   function approveAllShots() {
     if (!storyboard) return;
-    setReviewedShotIds(storyboard.shots.map((shot) => shot.id));
+    const next = storyboard.shots.map((shot) => shot.id);
+    setReviewedShotIds(next);
+    if (activeSavedScene) queueDeliveryTrackingSave(activeSavedScene.id, deliveryShotStatuses, next);
+    if (!activeSavedScene) setNotice('全部镜头已确认；保存本场状态后即可跨刷新保留。');
   }
 
   async function copyDeliveryPackage() {

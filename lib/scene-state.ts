@@ -22,6 +22,8 @@ export type DeliveryShotStatus = 'pending' | 'submitted' | 'accepted';
 
 export interface DeliveryTrackingState {
   statuses: Record<string, DeliveryShotStatus>;
+  reviewedShotIds: string[];
+  reviewedAt: string | null;
   updatedAt: string | null;
 }
 
@@ -31,6 +33,7 @@ export interface SceneProductionSummary {
   shotCount: number;
   durationSec: number;
   continuityIssueCount: number;
+  reviewedShotCount: number;
   submittedShotCount: number;
   acceptedShotCount: number;
   productionProgress: number;
@@ -133,6 +136,8 @@ export function buildSceneProductionSummary(
 ): SceneProductionSummary {
   const shots = storyboard?.shots ?? [];
   const shotCount = shots.length;
+  const reviewedShotSet = new Set(deliveryTracking.reviewedShotIds);
+  const reviewedShotCount = shots.filter((shot) => reviewedShotSet.has(shot.id)).length;
   const submittedShotCount = shots.filter((shot) => {
     const status = deliveryTracking.statuses[shot.id];
     return status === 'submitted' || status === 'accepted';
@@ -140,7 +145,7 @@ export function buildSceneProductionSummary(
   const acceptedShotCount = shots.filter((shot) => deliveryTracking.statuses[shot.id] === 'accepted').length;
   const continuityIssueCount = storyboard?.issues.filter((issue) => !issue.resolved).length ?? 0;
   const productionProgress = shotCount > 0 ? Math.round((acceptedShotCount / shotCount) * 100) : 0;
-  const status: SceneProductionStatus = continuityIssueCount > 0
+  const status: SceneProductionStatus = continuityIssueCount > 0 || reviewedShotCount < shotCount
     ? 'needs-review'
     : shotCount > 0 && acceptedShotCount === shotCount
       ? 'completed'
@@ -152,6 +157,7 @@ export function buildSceneProductionSummary(
     shotCount,
     durationSec: shots.reduce((total, shot) => total + Math.max(0, Number(shot.durationSec) || 0), 0),
     continuityIssueCount,
+    reviewedShotCount,
     submittedShotCount,
     acceptedShotCount,
     productionProgress,
