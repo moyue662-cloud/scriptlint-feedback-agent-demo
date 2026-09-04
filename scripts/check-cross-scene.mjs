@@ -170,11 +170,23 @@ const { assessScriptInput } = scriptInputModule;
   assert.deepEqual(secondContext.currentScene.factsToEstablish, ['林玄保研第一', '张宸落选']);
   assert.equal(secondContext.priorScenes.some((scene) => scene.establishedFacts.includes('林玄保研第一')), false);
 
+  const mergedFragments = normalizeNovelAdaptation({
+    theme: '拒绝碎片化', logline: '短句必须合并为可以继续拆镜头的完整事件。', characters: ['甲', '乙'], retainedPlotPoints: ['交付证据'], omittedContent: [],
+    scenes: [
+      { title: '发现', narrativeRole: '开场钩子', estimatedDurationSec: 5, retainedHighlights: ['发现证据'], appearingCharacters: ['甲'], establishedFacts: ['甲发现信封'], timeMarker: '', script: '甲发现桌上的信封。' },
+      { title: '对质', narrativeRole: '冲突建立', estimatedDurationSec: 18, retainedHighlights: ['当面对质'], appearingCharacters: ['甲', '乙'], establishedFacts: ['乙承认隐瞒'], timeMarker: '', script: '甲拿起信封走到乙面前，挡住出口追问来源。乙先夺信封又停手，避开目光承认自己隐瞒了寄件人。甲没有让路，而是把信封举到两人之间，要求乙当面说完。' },
+      { title: '选择', narrativeRole: '收束', estimatedDurationSec: 24, retainedHighlights: ['关系选择'], appearingCharacters: ['甲', '乙'], establishedFacts: ['甲暂不离开'], timeMarker: '', script: '甲把信封放回桌面，要求乙在天亮前说清全部经过。乙点头坐下，把手机递给甲查看记录；甲没有离开，而是拉开椅子坐到对面。乙解锁手机调出往来信息，甲逐条查看后把门重新关上。' },
+    ],
+  });
+  assert.equal(mergedFragments.scenes.length, 2);
+  assert.ok(mergedFragments.scenes.every((scene) => scene.script.replace(/\s/g, '').length >= 60));
+  assert.match(mergedFragments.scenes[0].script, /甲发现桌上的信封/);
+
   const prefixedTime = normalizeNovelAdaptation({
     theme: '时间测试', logline: '时间标记必须进入正文。', characters: ['甲', '乙'], retainedPlotPoints: [], omittedContent: [],
     scenes: [
-      { title: '前场', narrativeRole: '开场钩子', estimatedDurationSec: 30, retainedHighlights: [], appearingCharacters: ['甲', '乙'], establishedFacts: [], timeMarker: '', script: '甲把信封递给乙，乙接过信封后拆开，抬眼询问信件来源。甲避开目光，只让乙继续读完再说。' },
-      { title: '后场', narrativeRole: '收束', estimatedDurationSec: 30, retainedHighlights: [], appearingCharacters: ['甲', '乙'], establishedFacts: [], timeMarker: '两个月后', script: '甲在车站拦住乙，把已经磨损的信封重新递过去。乙没有接，转身望向进站列车。甲收回信封，站在原地目送乙登上列车。' },
+      { title: '前场', narrativeRole: '开场钩子', estimatedDurationSec: 30, retainedHighlights: [], appearingCharacters: ['甲', '乙'], establishedFacts: [], timeMarker: '', script: '甲把信封递给乙，乙接过信封后拆开，抬眼询问信件来源。甲避开目光，只让乙继续读完再说。乙抽出里面的照片摊在桌上，挡住甲准备收回信封的手。' },
+      { title: '后场', narrativeRole: '收束', estimatedDurationSec: 30, retainedHighlights: [], appearingCharacters: ['甲', '乙'], establishedFacts: [], timeMarker: '两个月后', script: '甲在车站拦住乙，把已经磨损的信封重新递过去。乙没有接，转身望向进站列车。甲收回信封，站在原地目送乙登上列车。列车启动后，乙隔着车窗抬起那张照片，向甲点头告别。' },
     ],
   });
   assert.ok(prefixedTime.scenes[1].script.startsWith('两个月后。'));

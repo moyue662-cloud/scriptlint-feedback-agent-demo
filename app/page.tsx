@@ -362,7 +362,8 @@ export default function Home() {
   }
 
   function loadBatchDraft(draft: ImportedSceneDraft) {
-    setAdaptationCompileContext(buildAdaptationCompileContext(batchAdaptation, draft));
+    const compileContext = buildAdaptationCompileContext(batchAdaptation, draft);
+    setAdaptationCompileContext(compileContext);
     setEpisodeNumber(draft.episodeNumber);
     setSceneTitle(draft.title);
     setScript(draft.script);
@@ -377,6 +378,29 @@ export default function Home() {
     setVisualFiles([]);
     setVisualReviewHistory([]);
     setNotice(`已载入“${draft.title}”${draft.splitReason === 'adapted' ? '（AI精简场景）' : ''}，现在可以运行AI编译或全流程。`);
+  }
+
+  async function compileBatchDraft(draft: ImportedSceneDraft) {
+    if (busy) return;
+    const compileContext = buildAdaptationCompileContext(batchAdaptation, draft);
+    loadBatchDraft(draft);
+    setIsRunning(true);
+    setNotice(`已自动采用“${draft.title}”，正在生成交互节拍，无需复制回原始剧本。`);
+    try {
+      const next = await requestAI(
+        { script: draft.script, mode: 'analyze' },
+        { episodeNumber: draft.episodeNumber, adaptationContext: compileContext, sceneId: null },
+      );
+      setResult(next);
+      setSource('ai');
+      setNotice(`“${draft.title}”已采用并完成AI编译。可继续检查问题、生成分镜或运行全流程。`);
+    } catch (error) {
+      setResult(analyzeScript(draft.script));
+      setSource('local');
+      setNotice(`${error instanceof Error ? error.message : '智能分析暂时不可用'}；精简场景已自动载入，并显示本地规则结果，无需手动复制。`);
+    } finally {
+      setIsRunning(false);
+    }
   }
 
   async function loadSceneVersions(sceneId: string) {
@@ -717,16 +741,24 @@ export default function Home() {
       : `当前文本检测到约 ${localStructureEstimate} 个结构单元${sceneDraftEstimate.length > 1 ? `，已先合并为 ${sceneDraftEstimate.length} 个原文场景草稿` : ''}。请确认场界后逐场编译。`);
   }
 
-  async function requestAI(body: Record<string, unknown>) {
+  async function requestAI(
+    body: Record<string, unknown>,
+    overrides?: { episodeNumber?: number; adaptationContext?: AdaptationCompileContext | null; sceneId?: string | null },
+  ) {
+    const targetEpisodeNumber = overrides?.episodeNumber ?? episodeNumber;
+    const targetAdaptationContext = overrides && 'adaptationContext' in overrides
+      ? overrides.adaptationContext
+      : adaptationCompileContext;
+    const targetSceneId = overrides && 'sceneId' in overrides ? overrides.sceneId : loadedSceneId;
     const response = await fetch('/api/analyze', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         ...body,
-        episodeNumber,
+        episodeNumber: targetEpisodeNumber,
         projectId: project?.id || DEFAULT_PROJECT_ID,
-        ...(loadedSceneId ? { sceneId: loadedSceneId } : {}),
-        ...(adaptationCompileContext ? { adaptationContext: adaptationCompileContext } : {}),
+        ...(targetSceneId ? { sceneId: targetSceneId } : {}),
+        ...(targetAdaptationContext ? { adaptationContext: targetAdaptationContext } : {}),
       }),
       signal: AbortSignal.timeout(AI_REQUEST_TIMEOUT_MS),
     });
@@ -1935,7 +1967,7 @@ export default function Home() {
                     <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
                       <div className="min-w-0">
                         <p className="text-sm font-semibold text-orange-950">小说/长剧本 → 短剧精简改编与分场</p>
-                        <p className="mt-1 text-xs leading-5 text-orange-900">“AI精简并拆场”会删除重复铺陈，保留主题、核心人物、主线、反转与高潮，再生成少量完整场景；“仅合并原文”不会删剧情，只把过短段落合并成较大的事件单元。</p>
+                        <p className="mt-1 text-xs leading-5 text-orange-900">“AI精简并拆场”会删除重复铺陈，保留主题、核心人物、主线、反转与高潮，再生成少量完整场景；这里的一项是整场戏，不是单个视频镜头，后续会继续拆成多个镜头。“仅合并原文”不会删剧情。</p>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         <Button onClick={() => void adaptBatchImport()} disabled={busy || !batchImportText.trim()}>{isBatchAdapting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Sparkles data-icon="inline-start" />}{isBatchAdapting ? '正在精简改编…' : 'AI精简并拆场'}</Button>
@@ -1969,8 +2001,8 @@ export default function Home() {
                         <div className="flex items-center justify-between gap-2"><p className="text-xs font-semibold text-orange-950">{batchAdaptation ? '已精简改编' : '已合并'} {batchDrafts.length} 个完整场次</p><Button size="sm" variant="ghost" onClick={() => { setBatchDrafts([]); setBatchAdaptation(null); setAdaptationCompileContext(null); }} disabled={busy}>清空草稿</Button></div>
                         {batchDrafts.map((draft, index) => (
                           <div key={`${draft.title}-${index}`} className="flex flex-col justify-between gap-2 rounded-lg border border-orange-100 bg-white/80 p-3 sm:flex-row sm:items-center">
-                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p>{draft.splitReason === 'adapted' ? <Badge className="bg-violet-700">AI精简场景</Badge> : draft.splitReason !== 'heading' && <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">待确认场界</Badge>}{draft.narrativeRole && <Badge variant="outline">{draft.narrativeRole}</Badge>}{draft.estimatedDurationSec && <span className="text-[11px] text-muted-foreground">约 {draft.estimatedDurationSec} 秒</span>}{draft.timeMarker && <Badge variant="outline">{draft.timeMarker}</Badge>}</div>{draft.retainedHighlights && draft.retainedHighlights.length > 0 && <p className="mt-1 text-[11px] text-violet-700">保留亮点：{draft.retainedHighlights.join('、')}</p>}{draft.appearingCharacters && draft.appearingCharacters.length > 0 && <p className="mt-1 text-[11px] text-muted-foreground">出场人物：{draft.appearingCharacters.join('、')}</p>}<p className="mt-1 line-clamp-3 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
-                            <Button size="sm" variant="outline" onClick={() => loadBatchDraft(draft)} disabled={busy}>载入编译</Button>
+                            <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><p className="text-xs font-semibold text-orange-950">第 {draft.episodeNumber} 集 · {draft.title}</p>{draft.splitReason === 'adapted' ? <Badge className="bg-violet-700">AI精简场景</Badge> : draft.splitReason !== 'heading' && <Badge variant="outline" className="border-amber-200 bg-amber-50 text-amber-800">待确认场界</Badge>}{draft.narrativeRole && <Badge variant="outline">{draft.narrativeRole}</Badge>}{draft.estimatedDurationSec && <span className="text-[11px] text-muted-foreground">整场约 {draft.estimatedDurationSec} 秒 · 后续拆镜头</span>}{draft.timeMarker && <Badge variant="outline">{draft.timeMarker}</Badge>}</div>{draft.retainedHighlights && draft.retainedHighlights.length > 0 && <p className="mt-1 text-[11px] text-violet-700">保留亮点：{draft.retainedHighlights.join('、')}</p>}{draft.appearingCharacters && draft.appearingCharacters.length > 0 && <p className="mt-1 text-[11px] text-muted-foreground">出场人物：{draft.appearingCharacters.join('、')}</p>}<p className="mt-1 line-clamp-3 text-[11px] leading-5 text-muted-foreground">{draft.script}</p></div>
+                            <div className="flex shrink-0 flex-wrap gap-2"><Button size="sm" variant="ghost" onClick={() => loadBatchDraft(draft)} disabled={busy}>载入修改</Button><Button size="sm" onClick={() => void compileBatchDraft(draft)} disabled={busy}>{isRunning ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Play data-icon="inline-start" className="fill-current" />}采用并编译</Button></div>
                           </div>
                         ))}
                       </div>

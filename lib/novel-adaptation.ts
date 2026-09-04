@@ -82,13 +82,66 @@ const cleanList = (value: unknown, limit: number) => Array.isArray(value)
   ? value.map((item) => cleanText(item)).filter(Boolean).slice(0, limit)
   : [];
 
+const MIN_ADAPTED_SCENE_CHARS = 60;
+
+function mergeUnique(left: string[] = [], right: string[] = [], limit: number) {
+  return [...new Set([...left, ...right])].slice(0, limit);
+}
+
+function mergeAdaptedScenes(left: ImportedSceneDraft, right: ImportedSceneDraft): ImportedSceneDraft {
+  const title = left.title === right.title ? left.title : `${left.title} / ${right.title}`.slice(0, 80);
+  return {
+    ...left,
+    title,
+    script: `${left.script}\n${right.script}`.trim(),
+    estimatedDurationSec: Math.min(120, (left.estimatedDurationSec ?? 20) + (right.estimatedDurationSec ?? 20)),
+    narrativeRole: right.narrativeRole === '高潮' || right.narrativeRole === '反转'
+      ? right.narrativeRole
+      : left.narrativeRole || right.narrativeRole,
+    retainedHighlights: mergeUnique(left.retainedHighlights, right.retainedHighlights, 4),
+    appearingCharacters: mergeUnique(left.appearingCharacters, right.appearingCharacters, 8),
+    establishedFacts: mergeUnique(left.establishedFacts, right.establishedFacts, 6),
+    timeMarker: left.timeMarker || right.timeMarker,
+  };
+}
+
+/**
+ * Models sometimes return outline fragments as scenes. Merge those fragments
+ * deterministically so one draft remains a complete multi-shot event instead
+ * of becoming a three-to-five-second video clip.
+ */
+function mergeShortAdaptedScenes(input: ImportedSceneDraft[]) {
+  const scenes: ImportedSceneDraft[] = [];
+  let pending: ImportedSceneDraft | null = null;
+
+  for (const original of input) {
+    let scene = original;
+    if (pending) {
+      scene = mergeAdaptedScenes(pending, scene);
+      pending = null;
+    }
+    if (scene.script.replace(/\s/g, '').length < MIN_ADAPTED_SCENE_CHARS) {
+      if (scenes.length > 0) scenes[scenes.length - 1] = mergeAdaptedScenes(scenes.at(-1)!, scene);
+      else pending = scene;
+      continue;
+    }
+    scenes.push(scene);
+  }
+
+  if (pending) {
+    if (scenes.length > 0) scenes[scenes.length - 1] = mergeAdaptedScenes(scenes.at(-1)!, pending);
+    else scenes.push(pending);
+  }
+  return scenes;
+}
+
 export function normalizeNovelAdaptation(raw: RawNovelAdaptation, episodeNumber = 1): NovelAdaptationResult {
   const normalizedEpisode = Math.max(1, Math.min(999, Math.round(Number(episodeNumber) || 1)));
   const rawScenes = Array.isArray(raw?.scenes) ? raw.scenes : [];
-  const scenes = rawScenes
+  const normalizedScenes = rawScenes
     .map((scene, index): ImportedSceneDraft | null => {
       const rawScript = cleanText(scene?.script);
-      if (rawScript.length < 40) return null;
+      if (!rawScript) return null;
       const timeMarker = cleanText(scene?.timeMarker).slice(0, 40);
       const script = timeMarker && !rawScript.slice(0, 50).includes(timeMarker)
         ? `${timeMarker}。\n${rawScript}`
@@ -109,7 +162,12 @@ export function normalizeNovelAdaptation(raw: RawNovelAdaptation, episodeNumber 
     .filter((scene): scene is ImportedSceneDraft => Boolean(scene))
     .slice(0, 16);
 
+  const scenes = mergeShortAdaptedScenes(normalizedScenes);
+
   if (scenes.length < 2) throw new Error('模型返回的完整场景不足，请重新运行改编。');
+  if (scenes.some((scene) => scene.script.replace(/\s/g, '').length < MIN_ADAPTED_SCENE_CHARS)) {
+    throw new Error('模型返回了过短的场景片段，请重新运行改编。');
+  }
 
   return {
     theme: cleanText(raw?.theme, '待人工确认主题'),
