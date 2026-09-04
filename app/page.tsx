@@ -778,7 +778,7 @@ export default function Home() {
           });
           analysisSource = 'ai';
         } catch {
-          analysis = repairAnalysis(analysis);
+          analysis = repairAnalysis(analysis, script);
           analysisSource = 'local';
         }
         scriptRepairCount += 1;
@@ -917,7 +917,7 @@ export default function Home() {
       setDeliveryCopied(false);
       setDeliveryShotStatuses({});
     } catch (error) {
-      setResult((current) => repairAnalysis(current));
+      setResult((current) => repairAnalysis(current, script));
       setSource('local');
       setLoopCount((current) => current + 1);
       setStoryboard(null);

@@ -102,6 +102,10 @@ function detectCharacters(script: string) {
   };
 
   for (const match of script.matchAll(/(?:^|[。！？!?\n])\s*([\u4e00-\u9fa5]{2,4})\s*[：:]/g)) add(match[1]);
+  for (const match of script.matchAll(/(?:我叫|名字是|名叫)\s*([\u4e00-\u9fa5]{2,4})(?=[，。！？!?\s]|$)/g)) add(match[1]);
+  for (const match of script.matchAll(
+    /(?:我的|他的|她的|其)(?:室友|舍友|同学|朋友|队友|同事|导师|辅导员|父亲|母亲|哥哥|姐姐|弟弟|妹妹)\s*([\u4e00-\u9fa5]{2,4})(?=[，。！？!?：:\s]|$)/g,
+  )) add(match[1]);
   for (const match of script.matchAll(
     /([\u4e00-\u9fa5]{2,4})(?=发现|看见|质问|询问|回答|解释|说道|说|问|喊|哭|笑|感到|试图|沉默|拿起|放下|转身|怀疑|不相信|尴尬|生气|愤怒|紧张|难过|害怕|高兴|追问)/g,
   )) add(match[1]);
@@ -403,22 +407,25 @@ export function normalizeAnalysisResult(
   };
 }
 
-export function repairAnalysis(result: AnalysisResult): AnalysisResult {
-  const namedCharacters = result.characters.filter((name) => name.trim() && !placeholderCharacterPattern.test(name.trim()));
-  const hasStableInteraction = namedCharacters.length >= 2 && result.beats.some((beat) =>
+export function repairAnalysis(result: AnalysisResult, script = ''): AnalysisResult {
+  const normalized = script
+    ? normalizeAnalysisResult(result, script, false) as AnalysisResult
+    : result;
+  const namedCharacters = normalized.characters.filter((name) => name.trim() && !placeholderCharacterPattern.test(name.trim()));
+  const hasStableInteraction = namedCharacters.length >= 2 && normalized.beats.some((beat) =>
     beat.actor !== beat.receiver
     && !placeholderCharacterPattern.test(beat.actor)
     && !placeholderCharacterPattern.test(beat.receiver),
   );
-  const issues = result.issues.map((issue) => ({
+  const issues = normalized.issues.map((issue) => ({
     ...issue,
     resolved: issue.type !== 'missing_character' || hasStableInteraction,
   }));
   const unresolvedHard = issues.filter((issue) => !issue.resolved && issue.severity === 'hard').length;
   const unresolvedSoft = issues.filter((issue) => !issue.resolved && issue.severity === 'soft').length;
   return {
-    ...result, issues,
-    score: Math.max(result.score, Math.min(99, 96 - unresolvedHard * 18 - unresolvedSoft * 5)),
-    executionPrompt: buildExecutionPrompt(result.beats), analyzedAt: new Date().toISOString(),
+    ...normalized, issues,
+    score: Math.max(normalized.score, Math.min(99, 96 - unresolvedHard * 18 - unresolvedSoft * 5)),
+    executionPrompt: buildExecutionPrompt(normalized.beats), analyzedAt: new Date().toISOString(),
   };
 }

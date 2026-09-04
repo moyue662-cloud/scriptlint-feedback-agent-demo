@@ -15,7 +15,7 @@ const { buildEpisodeReview } = episodeModule;
 const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
 const { buildEpisodeSourceHash, passesEpisodeAIReviewGate } = aiReviewModule;
 const { splitScriptIntoScenes } = batchImportModule;
-const { analyzeScript, normalizeAnalysisResult } = scriptEngineModule;
+const { analyzeScript, normalizeAnalysisResult, repairAnalysis } = scriptEngineModule;
 const { buildAdaptationCompileContext, normalizeNovelAdaptation } = adaptationModule;
 const { assessScriptInput } = scriptInputModule;
 
@@ -231,6 +231,22 @@ const { assessScriptInput } = scriptInputModule;
   }, '林玄看向张宸：“到此为止。”张宸收起笑容，后退半步。');
   assert.deepEqual(repairedScriptRoster.characters, ['林玄', '张宸']);
   assert.equal(repairedScriptRoster.issues[0].resolved, true);
+
+  const narrativeCastScript = '我叫林玄。可我的室友张宸，恰恰反道而行。他嘲讽我后，我抬眼看向他。';
+  const narrativeCast = analyzeScript(narrativeCastScript);
+  assert.ok(narrativeCast.characters.includes('林玄'));
+  assert.ok(narrativeCast.characters.includes('张宸'));
+  const locallyRepairedCast = repairAnalysis({
+    ...narrativeCast,
+    characters: ['林玄'],
+    beats: narrativeCast.beats.map((beat) => ({ ...beat, receiver: '对方' })),
+    issues: [{
+      id: 'LOCAL-SCRIPT-CAST', severity: 'hard', type: 'missing_character', targetId: 'SCRIPT', title: '交互对象不明确',
+      detail: '系统未能稳定识别至少两名人物。', suggestion: '补充人物。', resolved: false,
+    }],
+  }, narrativeCastScript);
+  assert.ok(locallyRepairedCast.characters.includes('张宸'));
+  assert.equal(locallyRepairedCast.issues[0].resolved, true);
 
   const placeholderResponse = normalizeAnalysisResult({
     characters: ['甲', '乙'], score: 70, executionPrompt: '',
