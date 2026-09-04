@@ -217,6 +217,21 @@ const { assessScriptInput } = scriptInputModule;
   assert.deepEqual(rosterAndPerformance.characters, ['林玄', '张宸', '辅导员']);
   assert.ok(rosterAndPerformance.issues.every((issue) => issue.resolved));
 
+  const repairedScriptRoster = normalizeAnalysisResult({
+    characters: ['林玄', '张宸'], score: 55, executionPrompt: '',
+    beats: [{
+      id: 'B01', source: '林玄看向张宸。', actor: '林玄', receiver: '张宸',
+      trigger: '张宸出言嘲讽', goal: '让张宸停止挑衅', action: '林玄抬眼直视张宸', dialogue: '到此为止。',
+      reaction: '张宸收起笑容', response: '张宸后退半步，没有继续开口', stateBefore: '克制', stateAfter: '警告',
+    }],
+    issues: [{
+      id: 'SCRIPT-CAST', severity: 'hard', type: 'missing_character', targetId: 'SCRIPT', title: '交互对象不明确',
+      detail: '系统未能稳定识别至少两名人物，无法验证动作与回应关系。', suggestion: '补充人物卡。', resolved: false,
+    }],
+  }, '林玄看向张宸：“到此为止。”张宸收起笑容，后退半步。');
+  assert.deepEqual(repairedScriptRoster.characters, ['林玄', '张宸']);
+  assert.equal(repairedScriptRoster.issues[0].resolved, true);
+
   const placeholderResponse = normalizeAnalysisResult({
     characters: ['甲', '乙'], score: 70, executionPrompt: '',
     beats: [{

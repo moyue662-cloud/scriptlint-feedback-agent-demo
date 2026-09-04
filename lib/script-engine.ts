@@ -71,6 +71,7 @@ const actionWords = [
 
 const genericActionPattern = /保持当前站位，把注意力转向对方，等待其反应|等待(?:其|对方)?(?:反应|回应)/;
 const genericResponsePattern = /^(?:以接下来的行动回应|等待(?:其|对方)?(?:反应|回应)|无回应|未回应|回应缺失)$/;
+const placeholderCharacterPattern = /^(?:对方|角色A|角色B|未知人物|众人|群体|旁白)$/;
 
 const characterStopWords = new Set([
   '原始剧本', '客厅', '晚上', '夜晚', '随后', '突然', '因为', '但是',
@@ -78,7 +79,7 @@ const characterStopWords = new Set([
   '很害怕地', '很高兴地', '试图隐瞒', '继续追问', '质问父亲',
 ]);
 
-const characterNoisePattern = /很|非常|试图|继续|突然|然后|此时|正在|不相信|的$|地$/;
+const characterNoisePattern = /很|非常|试图|继续|突然|然后|此时|正在|不相信|(?:收起|抬起|拿起|放下|抬眼|低头|转身|开口|停顿)$|的$|地$/;
 
 function splitSentences(script: string) {
   return (
@@ -105,7 +106,7 @@ function detectCharacters(script: string) {
     /([\u4e00-\u9fa5]{2,4})(?=发现|看见|质问|询问|回答|解释|说道|说|问|喊|哭|笑|感到|试图|沉默|拿起|放下|转身|怀疑|不相信|尴尬|生气|愤怒|紧张|难过|害怕|高兴|追问)/g,
   )) add(match[1]);
 
-  ['父亲', '母亲', '女儿', '儿子', '老师', '医生', '老板'].forEach((name) => {
+  ['父亲', '母亲', '女儿', '儿子', '老师', '医生', '老板', '辅导员', '室友', '同学', '经理', '警察', '护士', '店员', '服务员'].forEach((name) => {
     if (script.includes(name)) add(name);
   });
   return names.slice(0, 8);
@@ -283,6 +284,12 @@ export function normalizeAnalysisResult(
   rebuildWeakIssues = true,
 ): Omit<AnalysisResult, 'analyzedAt'> {
   const local = analyzeScript(script);
+  const declaredCharacters = [...new Set([
+    ...(Array.isArray(result.characters) ? result.characters : []),
+    ...local.characters,
+  ].flatMap((name) => typeof name === 'string' ? name.split(/[、,，/／]+/) : [])
+    .map((name) => name.trim())
+    .filter((name) => name && !placeholderCharacterPattern.test(name)))].slice(0, 12);
   const beats = (Array.isArray(result.beats) ? result.beats : []).slice(0, 30).map((raw, index) => {
     const fallback = local.beats[index];
     const source = typeof raw.source === 'string' && raw.source.trim() ? raw.source.trim() : fallback?.source ?? '';
@@ -299,12 +306,24 @@ export function normalizeAnalysisResult(
     const response = responseCandidate && !genericResponsePattern.test(responseCandidate)
       ? responseCandidate
       : `${typeof raw.receiver === 'string' && raw.receiver.trim() ? raw.receiver.trim() : fallback?.receiver ?? '对方'}停顿半秒，抬眼看向对方，以视线变化明确承接上一动作`;
+    const fallbackActor = fallback?.actor && !placeholderCharacterPattern.test(fallback.actor) ? fallback.actor : '';
+    const rawActor = typeof raw.actor === 'string' ? raw.actor.trim() : '';
+    const actor = rawActor && !placeholderCharacterPattern.test(rawActor)
+      ? rawActor
+      : fallbackActor || declaredCharacters[index % Math.max(1, declaredCharacters.length)] || '角色A';
+    const fallbackReceiver = fallback?.receiver && !placeholderCharacterPattern.test(fallback.receiver) && fallback.receiver !== actor
+      ? fallback.receiver
+      : '';
+    const rawReceiver = typeof raw.receiver === 'string' ? raw.receiver.trim() : '';
+    const receiver = rawReceiver && !placeholderCharacterPattern.test(rawReceiver) && rawReceiver !== actor
+      ? rawReceiver
+      : fallbackReceiver || declaredCharacters.find((character) => character !== actor) || '对方';
     return {
       ...raw,
       id: typeof raw.id === 'string' && raw.id.trim() ? raw.id : `B${String(index + 1).padStart(2, '0')}`,
       source,
-      actor: typeof raw.actor === 'string' && raw.actor.trim() ? raw.actor : fallback?.actor ?? '角色A',
-      receiver: typeof raw.receiver === 'string' && raw.receiver.trim() ? raw.receiver : fallback?.receiver ?? '对方',
+      actor,
+      receiver,
       trigger: typeof raw.trigger === 'string' && raw.trigger.trim() ? raw.trigger : fallback?.trigger ?? '场景开始，人物注意到当前变化',
       goal: typeof raw.goal === 'string' && raw.goal.trim() ? raw.goal : fallback?.goal ?? '让对方理解自己的立场',
       action,
@@ -318,12 +337,16 @@ export function normalizeAnalysisResult(
 
   const modelIssues = Array.isArray(result.issues) ? result.issues : [];
   const beatById = new Map(beats.map((beat) => [beat.id, beat]));
-  const placeholderCharacters = /^(?:对方|角色A|角色B|未知人物|众人|群体|旁白)$/;
   const characters = [...new Set([
-    ...(Array.isArray(result.characters) ? result.characters : []),
+    ...declaredCharacters,
     ...beats.flatMap((beat) => [beat.actor, beat.receiver]),
   ].flatMap((name) => typeof name === 'string' ? name.split(/[、,，/／]+/) : [])
-    .map((name) => name.trim()).filter((name) => name && !placeholderCharacters.test(name)))].slice(0, 12);
+    .map((name) => name.trim()).filter((name) => name && !placeholderCharacterPattern.test(name)))].slice(0, 12);
+  const hasStableInteraction = characters.length >= 2 && beats.some((beat) =>
+    beat.actor !== beat.receiver
+    && !placeholderCharacterPattern.test(beat.actor)
+    && !placeholderCharacterPattern.test(beat.receiver),
+  );
   const adjustedWeakIssues = modelIssues
     .filter((issue) => issue.type === 'weak_action')
     .map((issue) => {
@@ -342,6 +365,12 @@ export function normalizeAnalysisResult(
       ...issue,
       detail: '系统已根据节拍中的行动者和承接者自动同步人物表。',
       suggestion: '已自动补入人物表，无需人工处理。',
+      resolved: true,
+    };
+    if (issue.type === 'missing_character' && issue.targetId === 'SCRIPT' && hasStableInteraction) return {
+      ...issue,
+      detail: `系统已识别交互人物：${characters.join('、')}，并建立了明确的行动者与承接者关系。`,
+      suggestion: '已自动同步人物表和节拍交互对象，无需人工处理。',
       resolved: true,
     };
     if (issue.type === 'abstract_emotion' && beat && hasConcreteAction(beat.action)) return {
@@ -375,7 +404,16 @@ export function normalizeAnalysisResult(
 }
 
 export function repairAnalysis(result: AnalysisResult): AnalysisResult {
-  const issues = result.issues.map((issue) => ({ ...issue, resolved: issue.type !== 'missing_character' }));
+  const namedCharacters = result.characters.filter((name) => name.trim() && !placeholderCharacterPattern.test(name.trim()));
+  const hasStableInteraction = namedCharacters.length >= 2 && result.beats.some((beat) =>
+    beat.actor !== beat.receiver
+    && !placeholderCharacterPattern.test(beat.actor)
+    && !placeholderCharacterPattern.test(beat.receiver),
+  );
+  const issues = result.issues.map((issue) => ({
+    ...issue,
+    resolved: issue.type !== 'missing_character' || hasStableInteraction,
+  }));
   const unresolvedHard = issues.filter((issue) => !issue.resolved && issue.severity === 'hard').length;
   const unresolvedSoft = issues.filter((issue) => !issue.resolved && issue.severity === 'soft').length;
   return {

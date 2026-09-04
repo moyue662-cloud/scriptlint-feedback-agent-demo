@@ -289,11 +289,18 @@ export async function POST(request: Request) {
     const outputText = getOutputText(payload);
     if (!outputText) return Response.json({ error: '模型没有返回可用的结构化结果。' }, { status: 502 });
     const parsedResult = parseStructuredOutput(outputText);
+    const expectedSceneCharacters = adaptationContext?.currentScene.appearingCharacters ?? [];
+    const parsedWithSceneRoster = expectedSceneCharacters.length > 0
+      ? {
+          ...parsedResult,
+          characters: [...new Set([...(parsedResult.characters ?? []), ...expectedSceneCharacters])].slice(0, 12),
+        }
+      : parsedResult;
     // Keep the model's narrative decisions, but deterministically repair the
     // execution-critical fields before they reach the UI. In analyze mode we
     // rebuild weak-action findings from the normalized beats; in repair mode
     // we preserve the model's resolved/unresolved status for the current loop.
-    const normalizedResult = normalizeAnalysisResult(parsedResult, script, !isRepair);
+    const normalizedResult = normalizeAnalysisResult(parsedWithSceneRoster, script, !isRepair);
     const beatCheck = enforceBeatCompleteness(normalizedResult, script);
     const result = beatCheck.result;
 
