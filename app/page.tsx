@@ -391,6 +391,11 @@ export default function Home() {
     }
   }
 
+  async function openSceneForReview(scene: StoredScene) {
+    await loadSavedScene(scene);
+    setActiveTab('storyboard');
+  }
+
   function splitBatchImport() {
     const drafts = splitScriptIntoScenes(batchImportText, episodeNumber);
     setBatchAdaptation(null);
@@ -808,6 +813,7 @@ export default function Home() {
     const ordered = [...scenes].sort((a, b) => a.sceneOrder - b.sceneOrder || a.sceneNumber - b.sceneNumber);
     const totalShots = ordered.reduce((total, scene) => total + scene.summary.shotCount, 0);
     const totalDurationSec = ordered.reduce((total, scene) => total + scene.summary.durationSec, 0);
+    const reviewedShots = ordered.reduce((total, scene) => total + scene.summary.reviewedShotCount, 0);
     const acceptedShots = ordered.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0);
     const statusCounts = ordered.reduce<Record<SceneProductionStatus, number>>((counts, scene) => {
       counts[scene.summary.status] += 1;
@@ -822,11 +828,19 @@ export default function Home() {
       episodes,
       totalShots,
       totalDurationSec,
+      reviewedShots,
       acceptedShots,
       productionProgress: totalShots > 0 ? Math.round((acceptedShots / totalShots) * 100) : 0,
       statusCounts,
     };
   }, [scenes]);
+  const reviewQueue = useMemo(() => sceneTimeline.scenes.filter((scene) => (
+    scene.summary.reviewedShotCount < scene.summary.shotCount
+  )), [sceneTimeline]);
+  const currentReviewScene = loadedSceneId
+    ? reviewQueue.find((scene) => scene.id === loadedSceneId) ?? null
+    : null;
+  const nextReviewScene = currentReviewScene ?? reviewQueue[0] ?? null;
   const episodeSceneNumbers = (() => {
     const numbers = new Map<string, number>();
     const grouped = new Map<number, StoredScene[]>();
@@ -2157,6 +2171,27 @@ export default function Home() {
                   )}
 
                   {scenes.length > 0 && (
+                    <div className={`mb-4 rounded-xl border p-4 ${reviewQueue.length === 0 ? 'border-emerald-200 bg-emerald-50/60' : 'border-violet-200 bg-violet-50/60'}`}>
+                      <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <p className={`text-sm font-semibold ${reviewQueue.length === 0 ? 'text-emerald-950' : 'text-violet-950'}`}>整集人工审核队列</p>
+                            <Badge variant="outline" className={reviewQueue.length === 0 ? 'border-emerald-200 bg-white text-emerald-800' : 'border-violet-200 bg-white text-violet-800'}>{reviewQueue.length === 0 ? '全部场次已审' : `${reviewQueue.length} 场待审`}</Badge>
+                          </div>
+                          <p className={`mt-1 text-xs leading-5 ${reviewQueue.length === 0 ? 'text-emerald-800' : 'text-violet-800'}`}>已人工确认 {sceneTimeline.reviewedShots}/{sceneTimeline.totalShots} 个镜头。审核时逐项核对动作、台词、状态和视频Prompt。</p>
+                          <Progress value={sceneTimeline.totalShots > 0 ? (sceneTimeline.reviewedShots / sceneTimeline.totalShots) * 100 : 0} className="mt-3 h-1.5" />
+                        </div>
+                        {nextReviewScene ? (
+                          <Button onClick={() => void openSceneForReview(nextReviewScene)} disabled={busy}>
+                            <Check data-icon="inline-start" />
+                            {currentReviewScene ? '继续审核当前场' : '载入下一待审场次'}
+                          </Button>
+                        ) : <Badge className="bg-emerald-600">人工审核完成</Badge>}
+                      </div>
+                    </div>
+                  )}
+
+                  {scenes.length > 0 && (
                     <div className="mb-4 rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
                       <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-end">
                         <div className="min-w-0">
@@ -2185,7 +2220,7 @@ export default function Home() {
                       <div className="mt-4 space-y-4">
                         {visibleTimeline.episodes.map((episode) => (
                           <section key={episode.episodeNumber} className="rounded-lg border border-indigo-100 bg-white/55 p-3">
-                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场{episodeSummaries.find((summary) => summary.episodeNumber === episode.episodeNumber)?.title ? ` · ${episodeSummaries.find((summary) => summary.episodeNumber === episode.episodeNumber)?.title}` : ''}</p><p className="mt-1 text-[11px] text-indigo-700">{episode.scenes.reduce((total, scene) => total + scene.summary.durationSec, 0)}秒 · {episode.scenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0)}项待修 · {episode.scenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0)}/{episode.scenes.reduce((total, scene) => total + scene.summary.shotCount, 0)}镜头已验收</p></div><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
+                            <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-indigo-800">第 {episode.episodeNumber} 集 · {episode.scenes.length} 场{episodeSummaries.find((summary) => summary.episodeNumber === episode.episodeNumber)?.title ? ` · ${episodeSummaries.find((summary) => summary.episodeNumber === episode.episodeNumber)?.title}` : ''}</p><p className="mt-1 text-[11px] text-indigo-700">{episode.scenes.reduce((total, scene) => total + scene.summary.durationSec, 0)}秒 · {episode.scenes.reduce((total, scene) => total + scene.summary.continuityIssueCount, 0)}项待修 · {episode.scenes.reduce((total, scene) => total + scene.summary.reviewedShotCount, 0)}/{episode.scenes.reduce((total, scene) => total + scene.summary.shotCount, 0)}镜头已审 · {episode.scenes.reduce((total, scene) => total + scene.summary.acceptedShotCount, 0)}/{episode.scenes.reduce((total, scene) => total + scene.summary.shotCount, 0)}镜头已验收</p></div><span className="text-[11px] text-indigo-700">顺序可调整</span></div>
                             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
                               {episode.scenes.map((scene, index) => (
                                 <div
@@ -2226,6 +2261,10 @@ export default function Home() {
                                     <span><Clock className="mr-1 inline size-3" />{scene.summary.durationSec}秒</span>
                                     <span><Film className="mr-1 inline size-3" />{scene.summary.shotCount}镜头</span>
                                     <span className={scene.summary.continuityIssueCount > 0 ? 'text-amber-700' : 'text-emerald-700'}>{scene.summary.continuityIssueCount > 0 ? `待修 ${scene.summary.continuityIssueCount}` : '连续性通过'}</span>
+                                  </div>
+                                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                    <span className={scene.summary.reviewedShotCount === scene.summary.shotCount ? 'text-emerald-700' : 'text-violet-700'}>人工审核 {scene.summary.reviewedShotCount}/{scene.summary.shotCount}</span>
+                                    <Button size="sm" variant="outline" onClick={() => void openSceneForReview(scene)} disabled={busy}><Check data-icon="inline-start" />{scene.summary.reviewedShotCount === scene.summary.shotCount ? '复核分镜' : '审核分镜'}</Button>
                                   </div>
                                   <div className="mt-2 flex items-center gap-2"><Progress value={scene.summary.productionProgress} className="h-1.5 flex-1" /><span className="text-[11px] tabular-nums text-muted-foreground">{scene.summary.productionProgress}%</span></div>
                                   <div className="mt-3 flex justify-end gap-1">
