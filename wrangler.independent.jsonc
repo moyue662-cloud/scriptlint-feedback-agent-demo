@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sceneflow-independent",
+  "main": "dist/server/index.js",
+  "workers_dev": true,
+  "preview_urls": false,
+  "compatibility_date": "2026-05-15",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist/client"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "sceneflow-independent-db",
+      "database_id": "4741d43e-4baa-43c6-ad05-4c09d8620949"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

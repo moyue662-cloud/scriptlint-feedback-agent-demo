@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "vinext dev",
     "build": "vinext build",
+    "deploy:independent": "npm run build && wrangler deploy --config wrangler.independent.jsonc",
     "check:cross-scene": "node scripts/check-cross-scene.mjs",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint",
