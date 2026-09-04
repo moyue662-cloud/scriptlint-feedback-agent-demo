@@ -710,6 +710,36 @@ export default function Home() {
     }
   }
 
+  async function exportProductionPackage(output: 'json' | 'markdown') {
+    if (isProjectExporting) return;
+    setIsProjectExporting(true);
+    setNotice('');
+    try {
+      const response = await fetch(`/api/export?format=production&aspectRatio=${encodeURIComponent(deliveryAspectRatio)}${output === 'markdown' ? '&output=markdown' : ''}`);
+      const raw = await response.text();
+      if (!response.ok) {
+        let message = '整部短剧制作包生成失败';
+        try { message = (JSON.parse(raw) as { error?: string }).error || message; } catch { /* Keep the safe fallback. */ }
+        throw new Error(message);
+      }
+      const content = output === 'json' ? JSON.stringify(JSON.parse(raw), null, 2) : raw;
+      const mimeType = output === 'json' ? 'application/json;charset=utf-8' : 'text/markdown;charset=utf-8';
+      const blob = new Blob([content], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      const safeProjectName = (project?.name || '剧序项目').replace(/[\\/:*?"<>|]/g, '-');
+      anchor.href = url;
+      anchor.download = `${safeProjectName}-视频制作执行包-${deliveryAspectRatio.replace(':', 'x')}.${output === 'json' ? 'json' : 'md'}`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setNotice(`整部短剧${output === 'json' ? 'JSON' : 'Markdown'}制作执行包已导出，画幅为 ${deliveryAspectRatio}。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : '整部短剧制作包生成失败，请稍后重试。');
+    } finally {
+      setIsProjectExporting(false);
+    }
+  }
+
   function updateEpisodeSummaryDraft(field: keyof EpisodeSummaryDraft, value: string) {
     if (!activeSummaryEpisode) return;
     setEpisodeSummaryDrafts((current) => ({
@@ -2157,6 +2187,12 @@ export default function Home() {
                           {!projectReady && <p className="mt-3 text-[11px] text-amber-800">先处理各集固定规则、完成镜头验收，并确保最新AI审查没有结构阻断。AI的软性优化建议由人工终审决定是否采纳。</p>}
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-2">
+                          <Button variant="outline" onClick={() => void exportProductionPackage('markdown')} disabled={busy}>
+                            <FileText data-icon="inline-start" />制作清单 MD
+                          </Button>
+                          <Button variant="outline" onClick={() => void exportProductionPackage('json')} disabled={busy}>
+                            <Download data-icon="inline-start" />视频执行 JSON
+                          </Button>
                           <Button variant="outline" onClick={() => void exportProjectPackage()} disabled={busy}>
                             {isProjectExporting ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Download data-icon="inline-start" />}
                             {project?.approvedAt && projectReady ? '导出最终执行包' : '导出审查草稿'}

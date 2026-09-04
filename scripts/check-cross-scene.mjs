@@ -10,6 +10,7 @@ const { module: batchImportModule } = await runnerImport(path.resolve('lib/batch
 const { module: scriptEngineModule } = await runnerImport(path.resolve('lib/script-engine.ts'), loadOptions);
 const { module: adaptationModule } = await runnerImport(path.resolve('lib/novel-adaptation.ts'), loadOptions);
 const { module: scriptInputModule } = await runnerImport(path.resolve('lib/script-input.ts'), loadOptions);
+const { module: projectDeliveryModule } = await runnerImport(path.resolve('lib/project-delivery.ts'), loadOptions);
 
 const { buildEpisodeReview } = episodeModule;
 const { buildSceneSnapshot, inheritStoryboardOpeningState } = stateModule;
@@ -18,6 +19,7 @@ const { splitScriptIntoScenes } = batchImportModule;
 const { analyzeScript, normalizeAnalysisResult, repairAnalysis } = scriptEngineModule;
 const { buildAdaptationCompileContext, normalizeNovelAdaptation } = adaptationModule;
 const { assessScriptInput } = scriptInputModule;
+const { buildProjectProductionPackage, projectProductionPackageToMarkdown } = projectDeliveryModule;
 
   const endState = {
     characterPositions: '林晓站在茶几旁，父亲坐在沙发上',
@@ -114,6 +116,24 @@ const { assessScriptInput } = scriptInputModule;
     detailScenes[1],
   ], summary);
   assert.equal(originalHash, deliveryOnlyHash);
+
+  const productionPackage = buildProjectProductionPackage({
+    project: { id: 'default', name: '辞职真相', approvedAt: null, createdAt: '', updatedAt: '' },
+    scenes: [
+      { ...detailScenes[1], sceneOrder: 2 },
+      { ...detailScenes[0], sceneOrder: 1 },
+    ],
+    ready: false,
+    aspectRatio: '9:16',
+  });
+  assert.equal(productionPackage.packageType, 'review-draft');
+  assert.equal(productionPackage.output.resolution, '1080×1920');
+  assert.deepEqual(productionPackage.episodes[0].scenes.map((item) => item.title), ['发现通知书', '十分钟后继续对峙']);
+  assert.equal(productionPackage.episodes[0].scenes[1].shots[0].sequenceId, 'EP01-SC02-SH01');
+  assert.equal(productionPackage.totals.shots, 2);
+  const productionMarkdown = projectProductionPackageToMarkdown(productionPackage);
+  assert.match(productionMarkdown, /EP01-SC02-SH01/);
+  assert.match(productionMarkdown, /视频 Prompt/);
 
   const inheritedStoryboard = inheritStoryboardOpeningState(
     { ...storyboard, shots: [{ ...storyboard.shots[0], startState: changedOpening }] },

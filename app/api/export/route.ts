@@ -3,6 +3,7 @@ import { buildEpisodeSourceHash, passesEpisodeAIReviewGate } from '@/lib/episode
 import { getProject, listEpisodeAIReviews, listEpisodeSummaries, listSceneDetails } from '@/lib/scene-db';
 import { DEFAULT_PROJECT_ID } from '@/lib/scene-state';
 import { requireAuth } from '@/lib/auth';
+import { buildProjectProductionPackage, projectProductionPackageToMarkdown, type ProjectDeliveryAspectRatio } from '@/lib/project-delivery';
 
 export const runtime = 'edge';
 
@@ -35,6 +36,17 @@ export async function GET(request: Request) {
       };
     }));
     const ready = episodes.length > 0 && episodes.every((episode) => episode.review.status === 'ready' && passesEpisodeAIReviewGate(episode.aiReview));
+    const url = new URL(request.url);
+    if (url.searchParams.get('format') === 'production') {
+      const aspectRatio: ProjectDeliveryAspectRatio = url.searchParams.get('aspectRatio') === '16:9' ? '16:9' : '9:16';
+      const productionPackage = buildProjectProductionPackage({ project, scenes, ready, aspectRatio });
+      if (url.searchParams.get('output') === 'markdown') {
+        return new Response(projectProductionPackageToMarkdown(productionPackage), {
+          headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+        });
+      }
+      return Response.json(productionPackage);
+    }
     return Response.json({
       schemaVersion: 1,
       packageType: project.approvedAt && ready ? 'final' : 'review-draft',
